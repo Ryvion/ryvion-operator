@@ -13,9 +13,11 @@ import {
   getOperatorLogs,
   getOperatorStats,
   getOperatorStatus,
+  probeLocalRuntime,
   getStoredHubUrl,
   getStoredLocalAPIUrl,
   login,
+  type LocalRuntimeProbeResponse,
   savePayoutPreference,
   signup,
   type OperatorJob,
@@ -79,6 +81,7 @@ function App() {
   const [jobs, setJobs] = useState<OperatorJob[]>([])
   const [logs, setLogs] = useState<string[]>([])
   const [localError, setLocalError] = useState('')
+  const [runtimeProbe, setRuntimeProbe] = useState<LocalRuntimeProbeResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
@@ -149,12 +152,19 @@ function App() {
       setJobs(nextJobs.jobs)
       setLogs(nextLogs.lines)
       setLocalError('')
+      setRuntimeProbe(null)
       setLastRefreshAt(new Date())
       if (!readStoredValue(STORAGE_KEYS.hubUrl) && nextStatus.hub_url) {
         setHubUrl(nextStatus.hub_url)
       }
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
+      try {
+        const probe = await probeLocalRuntime(localApiUrl)
+        setRuntimeProbe(probe)
+      } catch {
+        setRuntimeProbe(null)
+      }
     } finally {
       setLoading(false)
     }
@@ -539,6 +549,44 @@ function App() {
               The desktop app could not reach the local node API. Check that the service is running, or update the local API
               URL in settings if you changed the port.
             </p>
+            {runtimeProbe ? (
+              <div className="stack top-gap">
+                <div className="capacity-grid">
+                  <MiniStat label="API target" value={`${runtimeProbe.api_host}:${runtimeProbe.api_port}`} />
+                  <MiniStat label="Port reachability" value={runtimeProbe.api_port_open ? 'Listening' : 'Closed'} />
+                  <MiniStat label="Service" value={runtimeProbe.service_installed ? (runtimeProbe.service_running ? 'Running' : 'Installed') : 'Missing'} />
+                  <MiniStat label="Service config" value={runtimeProbe.service_configured_for_api ? 'API enabled' : 'Legacy'} />
+                  <MiniStat label="Runtime binary" value={runtimeProbe.binary_supports_local_api ? 'Current' : 'Legacy'} />
+                  <MiniStat label="Platform" value={runtimeProbe.platform} />
+                </div>
+                {runtimeProbe.notes.length ? (
+                  <div>
+                    <p className="eyebrow">Diagnostics</p>
+                    <ul className="bullet-list">
+                      {runtimeProbe.notes.map((note) => (
+                        <li key={note}>{note}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {runtimeProbe.binary_paths.length ? (
+                  <div>
+                    <p className="eyebrow">Detected binaries</p>
+                    <div className="stack">
+                      {runtimeProbe.binary_paths.map((path) => (
+                        <MiniStat key={path} label="Binary" value={path} />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                <div className="inline-actions">
+                  <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.install_command, 'Copied install command.')}>Copy install command</button>
+                  {runtimeProbe.start_command ? <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.start_command!, 'Copied start command.')}>Copy start command</button> : null}
+                  {runtimeProbe.log_command ? <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.log_command!, 'Copied log command.')}>Copy log command</button> : null}
+                  <button className="ghost-button" onClick={() => void openExternal('https://ryvion.ai/operators')}>Open operator guide</button>
+                </div>
+              </div>
+            ) : null}
           </section>
         ) : null}
 

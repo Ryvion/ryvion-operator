@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import { readCloudToken, readStoredValue, STORAGE_KEYS } from './storage'
 
 export const DEFAULT_HUB_URL = 'https://ryvion-hub.fly.dev'
@@ -78,6 +79,24 @@ export interface OperatorConnectStatusResponse {
   onboarded: boolean
 }
 
+export interface LocalRuntimeProbeResponse {
+  platform: string
+  api_url: string
+  api_host: string
+  api_port: number
+  api_port_open: boolean
+  service_installed: boolean
+  service_running: boolean
+  service_configured_for_api: boolean
+  binary_supports_local_api: boolean
+  binary_paths: string[]
+  log_path?: string
+  install_command: string
+  start_command?: string
+  log_command?: string
+  notes: string[]
+}
+
 export interface LoginResponse {
   token: string
   buyer_id: string
@@ -148,8 +167,9 @@ function authHeaders(token?: string) {
 async function request<T>(baseUrl: string, path: string, init?: RequestInit & { timeoutMs?: number }) {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), init?.timeoutMs ?? 20000)
+  const target = `${normalizeBase(baseUrl)}${path}`
   try {
-    const response = await fetch(`${normalizeBase(baseUrl)}${path}`, {
+    const response = await fetch(target, {
       ...init,
       headers: {
         Accept: 'application/json',
@@ -165,6 +185,11 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit & { 
     }
     if (response.status === 204) return undefined as T
     return (await response.json()) as T
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Timed out while reaching ${target}`)
+    }
+    throw new Error(`Unable to reach ${target}`)
   } finally {
     window.clearTimeout(timeout)
   }
@@ -249,4 +274,8 @@ export function generateClaimCode(baseUrl: string, token?: string) {
     method: 'POST',
     headers: authHeaders(token),
   })
+}
+
+export function probeLocalRuntime(baseUrl = getStoredLocalAPIUrl()) {
+  return invoke<LocalRuntimeProbeResponse>('probe_local_runtime', { apiUrl: baseUrl })
 }
