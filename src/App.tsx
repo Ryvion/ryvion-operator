@@ -13,6 +13,7 @@ import {
   getOperatorLogs,
   getOperatorStats,
   getOperatorStatus,
+  normalizeEndpoint,
   probeLocalRuntime,
   runLocalRuntimeAction,
   getStoredHubUrl,
@@ -143,34 +144,86 @@ function App() {
     }
   }, [])
 
-  const refreshLocal = useCallback(async () => {
-    try {
-      const [nextStatus, nextJobs, nextLogs] = await Promise.all([
-        getOperatorStatus(localApiUrl),
-        getOperatorJobs(localApiUrl),
-        getOperatorLogs(200, localApiUrl),
-      ])
+  const applyLocalSnapshot = useCallback(
+    (
+      nextStatus: OperatorStatusResponse,
+      nextJobs: OperatorJob[],
+      nextLogs: string[],
+      sourceUrl: string,
+      options?: { autodetected?: boolean },
+    ) => {
       setStatus(nextStatus)
-      setJobs(nextJobs.jobs)
-      setLogs(nextLogs.lines)
+      setJobs(nextJobs)
+      setLogs(nextLogs)
       setLocalError('')
       setRuntimeProbe(null)
       setLastRefreshAt(new Date())
+      if (normalizeEndpoint(localApiUrl) !== normalizeEndpoint(sourceUrl)) {
+        setLocalApiUrl(sourceUrl)
+      }
+      if (nextStatus.runtime.local_api_url && normalizeEndpoint(localApiUrl) !== normalizeEndpoint(nextStatus.runtime.local_api_url)) {
+        setLocalApiUrl(nextStatus.runtime.local_api_url)
+      }
       if (!readStoredValue(STORAGE_KEYS.hubUrl) && nextStatus.hub_url) {
         setHubUrl(nextStatus.hub_url)
       }
+      if (options?.autodetected) {
+        setActionMessage(`Connected to detected local runtime at ${sourceUrl}.`)
+      }
+    },
+    [localApiUrl],
+  )
+
+  const fetchLocalSnapshot = useCallback(async (baseUrl: string) => {
+    const [nextStatus, nextJobs, nextLogs] = await Promise.all([
+      getOperatorStatus(baseUrl),
+      getOperatorJobs(baseUrl),
+      getOperatorLogs(200, baseUrl),
+    ])
+    return {
+      nextStatus,
+      nextJobs: nextJobs.jobs,
+      nextLogs: nextLogs.lines,
+    }
+  }, [])
+
+  const refreshLocal = useCallback(async () => {
+    try {
+      const snapshot = await fetchLocalSnapshot(localApiUrl)
+      applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, localApiUrl)
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
       try {
         const probe = await probeLocalRuntime(localApiUrl)
         setRuntimeProbe(probe)
+        const candidateUrls = Array.from(
+          new Set(
+            [probe.suggested_api_url, probe.configured_api_url, DEFAULT_LOCAL_API_URL, localApiUrl]
+              .map((value) => value?.trim() || '')
+              .filter(Boolean),
+          ),
+        ).filter((value) => normalizeEndpoint(value) !== normalizeEndpoint(localApiUrl))
+
+        for (const candidate of candidateUrls) {
+          const isLikelyRuntime = normalizeEndpoint(candidate) === normalizeEndpoint(probe.suggested_api_url) ? probe.configured_api_port_open : true
+          if (!isLikelyRuntime) continue
+          try {
+            const snapshot = await fetchLocalSnapshot(candidate)
+            applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, candidate, { autodetected: true })
+            return
+          } catch {
+            // Try the next candidate.
+          }
+        }
+
+        setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
       } catch {
         setRuntimeProbe(null)
+        setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
       }
     } finally {
       setLoading(false)
     }
-  }, [localApiUrl])
+  }, [applyLocalSnapshot, fetchLocalSnapshot, localApiUrl])
 
   const refreshCloud = useCallback(async () => {
     if (!cloudToken) {
@@ -572,11 +625,22 @@ function App() {
                 <div className="capacity-grid">
                   <MiniStat label="API target" value={`${runtimeProbe.api_host}:${runtimeProbe.api_port}`} />
                   <MiniStat label="Port reachability" value={runtimeProbe.api_port_open ? 'Listening' : 'Closed'} />
+                  <MiniStat label="Detected API" value={runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url} />
                   <MiniStat label="Service" value={runtimeProbe.service_installed ? (runtimeProbe.service_running ? 'Running' : 'Installed') : 'Missing'} />
                   <MiniStat label="Service config" value={runtimeProbe.service_configured_for_api ? 'API enabled' : 'Legacy'} />
                   <MiniStat label="Runtime binary" value={runtimeProbe.binary_supports_local_api ? 'Current' : 'Legacy'} />
                   <MiniStat label="Platform" value={runtimeProbe.platform} />
                 </div>
+                {runtimeProbe.api_url_mismatch ? (
+                  <Notice tone="neutral">
+                    <strong>Saved API target differs from the detected runtime endpoint.</strong>
+                    <p>
+                      Stored: {runtimeProbe.api_url}
+                      <br />
+                      Detected: {runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url}
+                    </p>
+                  </Notice>
+                ) : null}
                 {runtimeProbe.notes.length ? (
                   <div>
                     <p className="eyebrow">Diagnostics</p>
@@ -598,6 +662,15 @@ function App() {
                   </div>
                 ) : null}
                 <div className="inline-actions">
+                  {runtimeProbe.api_url_mismatch ? (
+                    <button
+                      className="primary-button"
+                      onClick={() => setLocalApiUrl(runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url)}
+                      disabled={runtimeActionBusy !== null}
+                    >
+                      Use detected endpoint
+                    </button>
+                  ) : null}
                   {runtimeProbe.service_installed ? (
                     <button
                       className="primary-button"
@@ -692,6 +765,7 @@ function App() {
                 localApiUrl={localApiUrl}
                 hubUrl={hubUrl}
                 declaredCountry={status.declared_country}
+                runtimeProbe={runtimeProbe}
                 onThemeChange={setTheme}
                 onLocalApiUrlChange={setLocalApiUrl}
                 onHubUrlChange={setHubUrl}
@@ -1324,6 +1398,7 @@ function SettingsView({
   localApiUrl,
   hubUrl,
   declaredCountry,
+  runtimeProbe,
   onThemeChange,
   onLocalApiUrlChange,
   onHubUrlChange,
@@ -1333,6 +1408,7 @@ function SettingsView({
   localApiUrl: string
   hubUrl: string
   declaredCountry?: string
+  runtimeProbe: LocalRuntimeProbeResponse | null
   onThemeChange: (theme: ThemeMode) => void
   onLocalApiUrlChange: (value: string) => void
   onHubUrlChange: (value: string) => void
@@ -1367,6 +1443,17 @@ function SettingsView({
           <span>Local API URL</span>
           <input value={localApiUrl} onChange={(event) => onLocalApiUrlChange(event.target.value)} />
         </label>
+        {runtimeProbe ? (
+          <div className="inline-actions">
+            <button
+              className="ghost-button"
+              onClick={() => onLocalApiUrlChange(runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url)}
+            >
+              Use detected runtime API
+            </button>
+            <p className="support-copy">Detected endpoint: {runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url}</p>
+          </div>
+        ) : null}
         <label>
           <span>Hub URL</span>
           <input value={hubUrl} onChange={(event) => onHubUrlChange(event.target.value)} />

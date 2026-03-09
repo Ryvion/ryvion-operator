@@ -85,6 +85,10 @@ export interface LocalRuntimeProbeResponse {
   api_host: string
   api_port: number
   api_port_open: boolean
+  configured_api_url?: string
+  configured_api_port_open: boolean
+  api_url_mismatch: boolean
+  suggested_api_url: string
   service_installed: boolean
   service_running: boolean
   service_configured_for_api: boolean
@@ -152,6 +156,10 @@ function normalizeBase(base: string) {
   return base.trim().replace(/\/+$/, '')
 }
 
+export function normalizeEndpoint(base: string) {
+  return normalizeBase(base).toLowerCase()
+}
+
 export function getStoredHubUrl() {
   const stored = readStoredValue(STORAGE_KEYS.hubUrl).trim()
   return stored || DEFAULT_HUB_URL
@@ -193,6 +201,9 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit & { 
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error(`Timed out while reaching ${target}`)
+    }
+    if (error instanceof Error && error.message) {
+      throw new Error(`Unable to reach ${target}: ${error.message}`)
     }
     throw new Error(`Unable to reach ${target}`)
   } finally {

@@ -12,6 +12,10 @@ struct LocalRuntimeProbe {
     api_host: String,
     api_port: u16,
     api_port_open: bool,
+    configured_api_url: Option<String>,
+    configured_api_port_open: bool,
+    api_url_mismatch: bool,
+    suggested_api_url: String,
     service_installed: bool,
     service_running: bool,
     service_configured_for_api: bool,
@@ -54,6 +58,10 @@ fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
         api_host: host,
         api_port: port,
         api_port_open,
+        configured_api_url: None,
+        configured_api_port_open: api_port_open,
+        api_url_mismatch: false,
+        suggested_api_url: format!("http://127.0.0.1:{port}"),
         service_installed: false,
         service_running: false,
         service_configured_for_api: false,
@@ -91,6 +99,7 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     let plist = PathBuf::from(&home).join("Library/LaunchAgents/com.ryvion.node.plist");
     let log_path = PathBuf::from(&home).join(".ryvion/node.log");
     let plist_contents = std::fs::read_to_string(&plist).unwrap_or_default();
+    let plist_args = extract_plist_program_arguments(&plist_contents);
     let mut binary_candidates = vec![
         "/usr/local/bin/ryvion-node".to_string(),
         "/opt/homebrew/bin/ryvion-node".to_string(),
@@ -106,8 +115,18 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
-    let service_configured_for_api = plist_contents.contains("<string>-ui-port</string>")
-        || plist_contents.contains("<key>RYV_UI_PORT</key>");
+    let configured_port = extract_plist_ui_port(&plist_contents)
+        .or_else(|| find_flag_value_in_tokens(&plist_args, "-ui-port").and_then(|value| value.parse::<u16>().ok()));
+    let configured_api_url = configured_port.map(loopback_api_url);
+    let configured_api_port_open = configured_port
+        .map(|configured| tcp_open("127.0.0.1", configured))
+        .unwrap_or(api_port_open);
+    let service_configured_for_api = configured_port.is_some();
+    let api_url_mismatch = configured_api_url
+        .as_ref()
+        .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
+        .unwrap_or(false);
+    let suggested_api_url = configured_api_url.clone().unwrap_or_else(|| loopback_api_url(port));
 
     let mut notes = Vec::new();
     if !installed {
@@ -125,6 +144,12 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     if service_running && !api_port_open {
         notes.push("The launch agent appears loaded, but the local operator API port is not listening yet.".to_string());
     }
+    if api_url_mismatch {
+        notes.push(format!(
+            "The saved operator API URL does not match the endpoint configured in the launch agent. Use {} instead.",
+            suggested_api_url
+        ));
+    }
 
     LocalRuntimeProbe {
         platform: "macos".to_string(),
@@ -132,6 +157,10 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
         api_host: host,
         api_port: port,
         api_port_open,
+        configured_api_url,
+        configured_api_port_open,
+        api_url_mismatch,
+        suggested_api_url,
         service_installed: installed,
         service_running,
         service_configured_for_api,
@@ -210,6 +239,7 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
     let service_installed = command_success("systemctl", &["status", "ryvion-node"]);
     let service_running = command_success("systemctl", &["is-active", "--quiet", "ryvion-node"]);
     let unit_text = command_output("systemctl", &["cat", "ryvion-node"]);
+    let exec_start = extract_systemd_exec_start_command(&unit_text);
     let mut binary_candidates = vec![
         "/opt/ryvion/ryvion-node".to_string(),
         "/usr/local/bin/ryvion-node".to_string(),
@@ -221,7 +251,18 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
-    let service_configured_for_api = unit_text.contains("Environment=RYV_UI_PORT=") || unit_text.contains("-ui-port");
+    let configured_port = extract_systemd_ui_port(&unit_text)
+        .or_else(|| exec_start.as_deref().and_then(|value| split_command_tokens(value)).as_ref().and_then(|tokens| find_flag_value_in_tokens(tokens, "-ui-port")).and_then(|value| value.parse::<u16>().ok()));
+    let configured_api_url = configured_port.map(loopback_api_url);
+    let configured_api_port_open = configured_port
+        .map(|configured| tcp_open("127.0.0.1", configured))
+        .unwrap_or(api_port_open);
+    let service_configured_for_api = configured_port.is_some();
+    let api_url_mismatch = configured_api_url
+        .as_ref()
+        .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
+        .unwrap_or(false);
+    let suggested_api_url = configured_api_url.clone().unwrap_or_else(|| loopback_api_url(port));
 
     let mut notes = Vec::new();
     if !service_installed {
@@ -239,6 +280,12 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
     if service_running && !api_port_open {
         notes.push("The service is active, but the local operator API port is not reachable.".to_string());
     }
+    if api_url_mismatch {
+        notes.push(format!(
+            "The saved operator API URL does not match the endpoint configured in systemd. Use {} instead.",
+            suggested_api_url
+        ));
+    }
 
     LocalRuntimeProbe {
         platform: "linux".to_string(),
@@ -246,6 +293,10 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
         api_host: host,
         api_port: port,
         api_port_open,
+        configured_api_url,
+        configured_api_port_open,
+        api_url_mismatch,
+        suggested_api_url,
         service_installed,
         service_running,
         service_configured_for_api,
@@ -289,7 +340,18 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
-    let service_configured_for_api = service_config.contains("-ui-port") || env::var("RYV_UI_PORT").is_ok();
+    let configured_port = extract_windows_service_ui_port(&service_config)
+        .or_else(|| env::var("RYV_UI_PORT").ok().and_then(|value| value.trim().parse::<u16>().ok()));
+    let configured_api_url = configured_port.map(loopback_api_url);
+    let configured_api_port_open = configured_port
+        .map(|configured| tcp_open("127.0.0.1", configured))
+        .unwrap_or(api_port_open);
+    let service_configured_for_api = configured_port.is_some();
+    let api_url_mismatch = configured_api_url
+        .as_ref()
+        .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
+        .unwrap_or(false);
+    let suggested_api_url = configured_api_url.clone().unwrap_or_else(|| loopback_api_url(port));
     let log_path = env::var("USERPROFILE").ok().map(|v| format!("{}\\.ryvion\\node.log", v));
 
     let mut notes = Vec::new();
@@ -308,6 +370,12 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
     if service_running && !api_port_open {
         notes.push("The Windows service is running, but the local operator API port is not reachable.".to_string());
     }
+    if api_url_mismatch {
+        notes.push(format!(
+            "The saved operator API URL does not match the endpoint configured in the Windows service. Use {} instead.",
+            suggested_api_url
+        ));
+    }
 
     LocalRuntimeProbe {
         platform: "windows".to_string(),
@@ -315,6 +383,10 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
         api_host: host,
         api_port: port,
         api_port_open,
+        configured_api_url,
+        configured_api_port_open,
+        api_url_mismatch,
+        suggested_api_url,
         service_installed,
         service_running,
         service_configured_for_api,
@@ -371,6 +443,14 @@ fn parse_host_port(api_url: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
+fn loopback_api_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+fn normalize_api_url(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
 fn tcp_open(host: &str, port: u16) -> bool {
     let address = format!("{}:{}", host, port);
     match address.to_socket_addrs() {
@@ -412,12 +492,52 @@ fn binary_help_contains(path: &str, needle: &str) -> bool {
     command_output(path, &["-h"]).contains(needle)
 }
 
-#[cfg(target_os = "macos")]
 fn escape_applescript(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
+fn find_flag_value_in_tokens(tokens: &[String], flag: &str) -> Option<String> {
+    tokens
+        .windows(2)
+        .find(|pair| pair.first().map(|token| token.as_str()) == Some(flag))
+        .and_then(|pair| pair.get(1).cloned())
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn split_command_tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+
+    for ch in input.chars() {
+        match ch {
+            '"' | '\'' => {
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                } else {
+                    current.push(ch);
+                }
+            }
+            ch if ch.is_whitespace() && quote.is_none() => {
+                if !current.is_empty() {
+                    tokens.push(current.trim().to_string());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+    tokens
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn extract_plist_program_path(contents: &str) -> Option<String> {
     let marker = "<key>ProgramArguments</key>";
     let start = contents.find(marker)?;
@@ -427,12 +547,85 @@ fn extract_plist_program_path(contents: &str) -> Option<String> {
     Some(rest[value_start + 8..value_start + 8 + value_end].trim().to_string())
 }
 
-#[cfg(target_os = "linux")]
-fn extract_systemd_exec_start(contents: &str) -> Option<String> {
+#[cfg(any(target_os = "macos", test))]
+fn extract_plist_program_arguments(contents: &str) -> Vec<String> {
+    let marker = "<key>ProgramArguments</key>";
+    let Some(start) = contents.find(marker) else {
+        return Vec::new();
+    };
+    let rest = &contents[start + marker.len()..];
+    let Some(array_start) = rest.find("<array>") else {
+        return Vec::new();
+    };
+    let after_array = &rest[array_start + "<array>".len()..];
+    let Some(array_end) = after_array.find("</array>") else {
+        return Vec::new();
+    };
+    let block = &after_array[..array_end];
+    let mut values = Vec::new();
+    let mut cursor = block;
+    while let Some(value_start) = cursor.find("<string>") {
+        let tail = &cursor[value_start + "<string>".len()..];
+        let Some(value_end) = tail.find("</string>") else {
+            break;
+        };
+        values.push(tail[..value_end].trim().to_string());
+        cursor = &tail[value_end + "</string>".len()..];
+    }
+    values
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn extract_plist_ui_port(contents: &str) -> Option<u16> {
+    if let Some(index) = contents.find("<key>RYV_UI_PORT</key>") {
+        let tail = &contents[index + "<key>RYV_UI_PORT</key>".len()..];
+        if let Some(value_start) = tail.find("<string>") {
+            let tail = &tail[value_start + "<string>".len()..];
+            if let Some(value_end) = tail.find("</string>") {
+                if let Ok(port) = tail[..value_end].trim().parse::<u16>() {
+                    return Some(port);
+                }
+            }
+        }
+    }
+    let args = extract_plist_program_arguments(contents);
+    find_flag_value_in_tokens(&args, "-ui-port").and_then(|value| value.parse::<u16>().ok())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn extract_systemd_exec_start_command(contents: &str) -> Option<String> {
     contents
         .lines()
         .find_map(|line| line.trim().strip_prefix("ExecStart=").map(|value| value.trim().to_string()))
-        .and_then(|value| value.split_whitespace().next().map(|token| token.to_string()))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn extract_systemd_ui_port(contents: &str) -> Option<u16> {
+    for line in contents.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("Environment=RYV_UI_PORT=") {
+            if let Ok(port) = value.trim_matches('"').trim().parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    extract_systemd_exec_start_command(contents)
+        .map(|value| split_command_tokens(&value))
+        .as_ref()
+        .and_then(|tokens| find_flag_value_in_tokens(tokens, "-ui-port"))
+        .and_then(|value| value.parse::<u16>().ok())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn extract_windows_service_ui_port(contents: &str) -> Option<u16> {
+    contents
+        .lines()
+        .find(|line| line.contains("BINARY_PATH_NAME"))
+        .and_then(|line| line.split_once(':').map(|(_, value)| value.trim().to_string()))
+        .map(|value| split_command_tokens(&value))
+        .as_ref()
+        .and_then(|tokens| find_flag_value_in_tokens(tokens, "-ui-port"))
+        .and_then(|value| value.parse::<u16>().ok())
 }
 
 #[cfg(target_os = "linux")]
@@ -461,4 +654,75 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![probe_local_runtime, run_local_runtime_action])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_plist_ui_port_from_environment() {
+        let plist = r#"
+        <plist>
+          <dict>
+            <key>EnvironmentVariables</key>
+            <dict>
+              <key>RYV_UI_PORT</key>
+              <string>45890</string>
+            </dict>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/usr/local/bin/ryvion-node</string>
+              <string>-hub</string>
+              <string>https://ryvion-hub.fly.dev</string>
+            </array>
+          </dict>
+        </plist>
+        "#;
+        assert_eq!(extract_plist_ui_port(plist), Some(45890));
+    }
+
+    #[test]
+    fn parses_plist_ui_port_from_program_arguments() {
+        let plist = r#"
+        <plist>
+          <dict>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/usr/local/bin/ryvion-node</string>
+              <string>-hub</string>
+              <string>https://ryvion-hub.fly.dev</string>
+              <string>-ui-port</string>
+              <string>45901</string>
+            </array>
+          </dict>
+        </plist>
+        "#;
+        assert_eq!(extract_plist_ui_port(plist), Some(45901));
+    }
+
+    #[test]
+    fn parses_systemd_ui_port() {
+        let unit = r#"
+        [Service]
+        ExecStart=/opt/ryvion/ryvion-node -hub https://ryvion-hub.fly.dev -ui-port 45910
+        Environment=RYV_UI_PORT=45910
+        "#;
+        assert_eq!(extract_systemd_ui_port(unit), Some(45910));
+    }
+
+    #[test]
+    fn parses_windows_service_ui_port() {
+        let config = r#"
+SERVICE_NAME: RyvionNode
+        BINARY_PATH_NAME   : "C:\Program Files\Ryvion\ryvion-node.exe" -hub https://ryvion-hub.fly.dev -ui-port 45920
+        "#;
+        assert_eq!(extract_windows_service_ui_port(config), Some(45920));
+    }
+
+    #[test]
+    fn splits_quoted_command_tokens() {
+        let tokens = split_command_tokens(r#""C:\Program Files\Ryvion\ryvion-node.exe" -ui-port 45890"#);
+        assert_eq!(tokens, vec![r#"C:\Program Files\Ryvion\ryvion-node.exe"#, "-ui-port", "45890"]);
+    }
 }
