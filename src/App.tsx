@@ -695,83 +695,82 @@ function App() {
           </section>
         ) : null}
 
-        {status ? (
-          <>
-            {activeView === 'overview' ? (
-              <OverviewView
-                status={status}
-                currentJob={currentJob}
-                jobs={jobs}
-                cloudStats={cloudStats}
-                lastRefreshAt={lastRefreshAt}
-                runtimeAlerts={runtimeAlerts}
-                updateAvailable={updateAvailable}
-                onCopy={handleCopy}
-                onOpenExternal={openExternal}
-              />
-            ) : null}
-            {activeView === 'machine' ? <MachineView status={status} workloadMatrix={workloadMatrix} /> : null}
-            {activeView === 'jobs' ? <JobsView currentJob={currentJob} jobs={jobs} onCopy={handleCopy} onOpenExternal={openExternal} /> : null}
-            {activeView === 'earnings' ? (
-              <EarningsView
-                status={status}
-                cloudToken={cloudToken}
-                cloudUser={cloudUser}
-                cloudStats={cloudStats}
-                cloudMode={cloudMode}
-                cloudForm={cloudForm}
-                claimCode={claimCode}
-                claimCodeExpiry={claimCodeExpiry}
-                claimInput={claimInput}
-                connectEmail={connectEmail}
-                connectCountry={connectCountry}
-                connectCurrency={connectCurrency}
-                connectAccountId={connectAccountId}
-                connectOnboarded={connectOnboarded}
-                cloudBusy={cloudBusy}
-                onCloudModeChange={setCloudMode}
-                onCloudFormChange={setCloudForm}
-                onAuth={handleCloudAuth}
-                onGenerateClaimCode={handleGenerateClaimCode}
-                onClaimInputChange={setClaimInput}
-                onClaimNode={handleClaimNode}
-                onConnectEmailChange={setConnectEmail}
-                onConnectCountryChange={setConnectCountry}
-                onConnectCurrencyChange={setConnectCurrency}
-                onConnectAccountIdChange={setConnectAccountId}
-                onCreateConnect={handleCreateConnect}
-                onOpenOnboarding={handleOpenOnboarding}
-                onSavePayout={handleSavePayout}
-                onRefreshConnectStatus={handleRefreshConnectStatus}
-                onCopy={handleCopy}
-                onSignOut={signOut}
-              />
-            ) : null}
-            {activeView === 'diagnostics' ? (
-              <DiagnosticsView
-                status={status}
-                logs={logs}
-                diagnostics={diagnostics}
-                localApiUrl={localApiUrl}
-                onCopy={handleCopy}
-                onOpenExternal={openExternal}
-                updateAvailable={updateAvailable}
-              />
-            ) : null}
-            {activeView === 'settings' ? (
-              <SettingsView
-                theme={theme}
-                localApiUrl={localApiUrl}
-                hubUrl={hubUrl}
-                declaredCountry={status.declared_country}
-                runtimeProbe={runtimeProbe}
-                onThemeChange={setTheme}
-                onLocalApiUrlChange={setLocalApiUrl}
-                onHubUrlChange={setHubUrl}
-                onOpenExternal={openExternal}
-              />
-            ) : null}
-          </>
+        {activeView === 'overview' && status ? (
+          <OverviewView
+            status={status}
+            currentJob={currentJob}
+            jobs={jobs}
+            cloudStats={cloudStats}
+            lastRefreshAt={lastRefreshAt}
+            runtimeAlerts={runtimeAlerts}
+            updateAvailable={updateAvailable}
+            onCopy={handleCopy}
+            onOpenExternal={openExternal}
+          />
+        ) : null}
+        {activeView === 'machine' && status ? <MachineView status={status} workloadMatrix={workloadMatrix} /> : null}
+        {activeView === 'jobs' ? (
+          <JobsView currentJob={currentJob} jobs={jobs} onCopy={handleCopy} onOpenExternal={openExternal} runtimeAvailable={Boolean(status)} />
+        ) : null}
+        {activeView === 'earnings' ? (
+          <EarningsView
+            status={status}
+            cloudToken={cloudToken}
+            cloudUser={cloudUser}
+            cloudStats={cloudStats}
+            cloudMode={cloudMode}
+            cloudForm={cloudForm}
+            claimCode={claimCode}
+            claimCodeExpiry={claimCodeExpiry}
+            claimInput={claimInput}
+            connectEmail={connectEmail}
+            connectCountry={connectCountry}
+            connectCurrency={connectCurrency}
+            connectAccountId={connectAccountId}
+            connectOnboarded={connectOnboarded}
+            cloudBusy={cloudBusy}
+            onCloudModeChange={setCloudMode}
+            onCloudFormChange={setCloudForm}
+            onAuth={handleCloudAuth}
+            onGenerateClaimCode={handleGenerateClaimCode}
+            onClaimInputChange={setClaimInput}
+            onClaimNode={handleClaimNode}
+            onConnectEmailChange={setConnectEmail}
+            onConnectCountryChange={setConnectCountry}
+            onConnectCurrencyChange={setConnectCurrency}
+            onConnectAccountIdChange={setConnectAccountId}
+            onCreateConnect={handleCreateConnect}
+            onOpenOnboarding={handleOpenOnboarding}
+            onSavePayout={handleSavePayout}
+            onRefreshConnectStatus={handleRefreshConnectStatus}
+            onCopy={handleCopy}
+            onSignOut={signOut}
+          />
+        ) : null}
+        {activeView === 'diagnostics' ? (
+          <DiagnosticsView
+            status={status}
+            hubUrl={hubUrl}
+            logs={logs}
+            diagnostics={diagnostics}
+            localApiUrl={localApiUrl}
+            onCopy={handleCopy}
+            onOpenExternal={openExternal}
+            updateAvailable={updateAvailable}
+          />
+        ) : null}
+        {activeView === 'settings' ? (
+          <SettingsView
+            theme={theme}
+            localApiUrl={localApiUrl}
+            hubUrl={hubUrl}
+            declaredCountry={status?.declared_country}
+            runtimeProbe={runtimeProbe}
+            onThemeChange={setTheme}
+            onLocalApiUrlChange={setLocalApiUrl}
+            onHubUrlChange={setHubUrl}
+            onOpenExternal={openExternal}
+          />
         ) : null}
       </main>
     </div>
@@ -1022,11 +1021,13 @@ function JobsView({
   jobs,
   onCopy,
   onOpenExternal,
+  runtimeAvailable,
 }: {
   currentJob: OperatorJob | null
   jobs: OperatorJob[]
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
+  runtimeAvailable: boolean
 }) {
   return (
     <div className="view-grid">
@@ -1049,7 +1050,7 @@ function JobsView({
               </tr>
             </thead>
             <tbody>
-              {jobs.map((job) => (
+              {jobs.length ? jobs.map((job) => (
                 <tr key={job.job_id}>
                   <td>
                     <strong>{job.kind}</strong>
@@ -1070,7 +1071,13 @@ function JobsView({
                     </div>
                   </td>
                 </tr>
-              ))}
+              )) : (
+                <tr>
+                  <td colSpan={5}>
+                    {runtimeAvailable ? 'No workloads have been recorded on this node yet.' : 'Local runtime is unavailable, so job history could not be loaded.'}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1108,7 +1115,7 @@ function JobsView({
 }
 
 function EarningsView(props: {
-  status: OperatorStatusResponse
+  status: OperatorStatusResponse | null
   cloudToken: string
   cloudUser: CloudAuthUser | null
   cloudStats: OperatorStatsResponse | null
@@ -1244,8 +1251,10 @@ function EarningsView(props: {
             <span>Redeem code on this node</span>
             <input value={claimInput} onChange={(event) => onClaimInputChange(event.target.value.toUpperCase())} placeholder="RYV-1234" />
           </label>
-          <button className="primary-button" onClick={onClaimNode} disabled={!claimInput.trim()}>Claim node</button>
-          <p className="support-copy">Current node: {shortHash(status.public_key_hex, 8)}</p>
+          <button className="primary-button" onClick={onClaimNode} disabled={!claimInput.trim() || !status}>Claim node</button>
+          <p className="support-copy">
+            Current node: {status ? shortHash(status.public_key_hex, 8) : 'Local runtime unavailable'}
+          </p>
         </div>
       </section>
 
@@ -1326,6 +1335,7 @@ function EarningsView(props: {
 
 function DiagnosticsView({
   status,
+  hubUrl,
   logs,
   diagnostics,
   localApiUrl,
@@ -1333,7 +1343,8 @@ function DiagnosticsView({
   onOpenExternal,
   updateAvailable,
 }: {
-  status: OperatorStatusResponse
+  status: OperatorStatusResponse | null
+  hubUrl: string
   logs: string[]
   diagnostics: OperatorDiagnosticsResponse | null
   localApiUrl: string
@@ -1352,16 +1363,16 @@ function DiagnosticsView({
         </div>
         <dl className="definition-list">
           <div><dt>Local API</dt><dd>{localApiUrl}</dd></div>
-          <div><dt>Hub</dt><dd>{status.hub_url}</dd></div>
-          <div><dt>Version</dt><dd>{status.version}{status.latest_version ? ` · latest ${status.latest_version}` : ''}</dd></div>
-          <div><dt>Native model</dt><dd>{status.runtime.native_model || 'Not loaded'}</dd></div>
+          <div><dt>Hub</dt><dd>{status?.hub_url || hubUrl}</dd></div>
+          <div><dt>Version</dt><dd>{status ? `${status.version}${status.latest_version ? ` · latest ${status.latest_version}` : ''}` : 'Unavailable'}</dd></div>
+          <div><dt>Native model</dt><dd>{status?.runtime.native_model || 'Not loaded'}</dd></div>
         </dl>
         <div className="inline-actions">
-          <button className="ghost-button" onClick={() => onCopy(status.public_key_hex, 'Copied node public key.')}>Copy public key</button>
+          {status ? <button className="ghost-button" onClick={() => onCopy(status.public_key_hex, 'Copied node public key.')}>Copy public key</button> : null}
           {diagnostics ? <button className="ghost-button" onClick={() => onCopy(JSON.stringify(diagnostics, null, 2), 'Copied diagnostics snapshot.')}>Copy diagnostics JSON</button> : null}
           <button className="ghost-button" onClick={() => onCopy(logs.join('\n'), 'Copied log tail.')}>Copy logs</button>
           <button className="ghost-button" onClick={() => void onOpenExternal(`${localApiUrl}/healthz`)}>Open local health</button>
-          <button className="ghost-button" onClick={() => void onOpenExternal(`${status.hub_url}/healthz`)}>Open hub health</button>
+          <button className="ghost-button" onClick={() => void onOpenExternal(`${status?.hub_url || hubUrl}/healthz`)}>Open hub health</button>
           <button className="ghost-button" onClick={() => void onOpenExternal('https://ryvion.ai/status')}>Open network status</button>
         </div>
       </section>
@@ -1382,7 +1393,7 @@ function DiagnosticsView({
                 value={`${issue.message}${issue.updated_at ? ` · ${formatRelative(issue.updated_at)}` : ''}`}
               />
             ))}
-            <MiniStat label="Runtime version" value={`${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}`} />
+            <MiniStat label="Runtime version" value={status ? `${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}` : 'Unavailable'} />
           </div>
         ) : (
           <div className="stack">
@@ -1390,7 +1401,7 @@ function DiagnosticsView({
             <MiniStat label="Heartbeat" value="Clear" />
             <MiniStat label="Claim" value="Clear" />
             <MiniStat label="Payout" value="Clear" />
-            <MiniStat label="Runtime version" value={`${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}`} />
+            <MiniStat label="Runtime version" value={status ? `${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}` : 'Unavailable'} />
           </div>
         )}
       </section>
