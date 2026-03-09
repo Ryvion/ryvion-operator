@@ -1,11 +1,15 @@
+use reqwest::blocking::Client;
 use serde::Serialize;
+use serde_json::Value;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-#[derive(Serialize)]
+const DEFAULT_LOCAL_API_URL: &str = "http://127.0.0.1:45890";
+
+#[derive(Clone, Serialize)]
 struct LocalRuntimeProbe {
     platform: String,
     api_url: String,
@@ -32,6 +36,27 @@ struct LocalRuntimeProbe {
 struct RuntimeActionResult {
     launched: bool,
     message: String,
+}
+
+#[derive(Serialize)]
+struct LocalRuntimeAttempt {
+    api_url: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LocalRuntimeSnapshot {
+    ok: bool,
+    api_url: Option<String>,
+    recovered: bool,
+    probe: LocalRuntimeProbe,
+    attempts: Vec<LocalRuntimeAttempt>,
+    status: Option<Value>,
+    jobs: Option<Value>,
+    logs: Option<Value>,
+    diagnostics: Option<Value>,
+    error: Option<String>,
 }
 
 #[tauri::command]
@@ -91,6 +116,77 @@ fn run_local_runtime_action(action: String, api_url: String, hub_url: Option<Str
     }
     #[allow(unreachable_code)]
     Err(format!("runtime action '{}' is not supported on {}", action, env::consts::OS))
+}
+
+#[tauri::command]
+fn load_local_runtime_snapshot(api_url: String) -> LocalRuntimeSnapshot {
+    let probe = probe_local_runtime(api_url.clone());
+    let candidates = candidate_api_urls(&api_url, &probe);
+    let client = match Client::builder().timeout(Duration::from_secs(4)).build() {
+        Ok(client) => client,
+        Err(err) => {
+            return LocalRuntimeSnapshot {
+                ok: false,
+                api_url: None,
+                recovered: false,
+                probe,
+                attempts: Vec::new(),
+                status: None,
+                jobs: None,
+                logs: None,
+                diagnostics: None,
+                error: Some(format!("Failed to initialize local runtime client: {err}")),
+            }
+        }
+    };
+
+    let mut attempts = Vec::new();
+    let mut last_error = String::new();
+    for candidate in candidates {
+        match fetch_runtime_snapshot_for_candidate(&client, &candidate) {
+            Ok((status, jobs, logs, diagnostics)) => {
+                let recovered = normalize_api_url(&candidate) != normalize_api_url(&api_url);
+                attempts.push(LocalRuntimeAttempt {
+                    api_url: candidate.clone(),
+                    ok: true,
+                    error: None,
+                });
+                return LocalRuntimeSnapshot {
+                    ok: true,
+                    api_url: Some(candidate),
+                    recovered,
+                    probe,
+                    attempts,
+                    status: Some(status),
+                    jobs: Some(jobs),
+                    logs: Some(logs),
+                    diagnostics,
+                    error: None,
+                };
+            }
+            Err(err) => {
+                last_error = err.clone();
+                attempts.push(LocalRuntimeAttempt {
+                    api_url: candidate,
+                    ok: false,
+                    error: Some(err),
+                });
+            }
+        }
+    }
+
+    LocalRuntimeSnapshot {
+        ok: false,
+        api_url: None,
+        recovered: false,
+        probe,
+        attempts,
+        status: None,
+        jobs: None,
+        logs: None,
+        diagnostics: None,
+        error: Some(last_error_or_default(&last_error, "Unable to reach the local operator API.")),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -433,6 +529,79 @@ fn run_windows_runtime_action(action: &str, hub_url: Option<&str>) -> Result<Run
     })
 }
 
+fn candidate_api_urls(requested: &str, probe: &LocalRuntimeProbe) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for value in [
+        Some(requested.to_string()),
+        probe.configured_api_url.clone(),
+        Some(probe.suggested_api_url.clone()),
+        Some(DEFAULT_LOCAL_API_URL.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|existing: &String| normalize_api_url(existing) == normalize_api_url(trimmed))
+        {
+            continue;
+        }
+        candidates.push(trimmed.to_string());
+    }
+    candidates
+}
+
+fn fetch_runtime_snapshot_for_candidate(
+    client: &Client,
+    base_url: &str,
+) -> Result<(Value, Value, Value, Option<Value>), String> {
+    let status = fetch_required_json(client, base_url, "/api/v1/operator/status")?;
+    let jobs = fetch_optional_json(client, base_url, "/api/v1/operator/jobs")
+        .unwrap_or_else(|| serde_json::json!({ "jobs": [] }));
+    let logs = fetch_optional_json(client, base_url, "/api/v1/operator/logs?limit=200")
+        .unwrap_or_else(|| serde_json::json!({ "lines": [] }));
+    let diagnostics = fetch_optional_json(client, base_url, "/api/v1/operator/diagnostics");
+    Ok((status, jobs, logs, diagnostics))
+}
+
+fn fetch_required_json(client: &Client, base_url: &str, path: &str) -> Result<Value, String> {
+    let url = format!("{}{}", normalize_http_base(base_url), path);
+    let response = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|err| format!("{}: {}", url, err))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(format!("{}: {} {}", url, status.as_u16(), body.trim()));
+    }
+    response
+        .json::<Value>()
+        .map_err(|err| format!("{}: invalid JSON response ({})", url, err))
+}
+
+fn fetch_optional_json(client: &Client, base_url: &str, path: &str) -> Option<Value> {
+    fetch_required_json(client, base_url, path).ok()
+}
+
+fn normalize_http_base(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
+
+fn last_error_or_default(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn parse_host_port(api_url: &str) -> Option<(String, u16)> {
     let trimmed = api_url.trim();
     let without_scheme = trimmed
@@ -664,7 +833,11 @@ fn launch_linux_terminal(command: &str) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![probe_local_runtime, run_local_runtime_action])
+        .invoke_handler(tauri::generate_handler![
+            probe_local_runtime,
+            load_local_runtime_snapshot,
+            run_local_runtime_action
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -672,6 +845,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn parses_plist_ui_port_from_environment() {
@@ -749,5 +925,90 @@ SERVICE_NAME: RyvionNode
     fn splits_quoted_command_tokens() {
         let tokens = split_command_tokens(r#""C:\Program Files\Ryvion\ryvion-node.exe" -ui-port 45890"#);
         assert_eq!(tokens, vec![r#"C:\Program Files\Ryvion\ryvion-node.exe"#, "-ui-port", "45890"]);
+    }
+
+    #[test]
+    fn candidate_api_urls_are_deduplicated_and_ordered() {
+        let probe = LocalRuntimeProbe {
+            platform: "macos".to_string(),
+            api_url: "http://127.0.0.1:45891".to_string(),
+            api_host: "127.0.0.1".to_string(),
+            api_port: 45891,
+            api_port_open: false,
+            configured_api_url: Some("http://127.0.0.1:45890".to_string()),
+            configured_api_port_open: true,
+            api_url_mismatch: true,
+            suggested_api_url: "http://127.0.0.1:45890".to_string(),
+            service_installed: true,
+            service_running: true,
+            service_configured_for_api: true,
+            binary_supports_local_api: true,
+            binary_paths: vec!["/usr/local/bin/ryvion-node".to_string()],
+            log_path: None,
+            install_command: "install".to_string(),
+            start_command: None,
+            log_command: None,
+            notes: Vec::new(),
+        };
+
+        let candidates = candidate_api_urls("http://127.0.0.1:45891", &probe);
+        assert_eq!(
+            candidates,
+            vec![
+                "http://127.0.0.1:45891".to_string(),
+                "http://127.0.0.1:45890".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn fetch_runtime_snapshot_reads_local_operator_endpoints() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("read listener addr");
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept connection");
+                let mut buffer = [0u8; 2048];
+                let bytes = stream.read(&mut buffer).expect("read request");
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let (status, body) = match path {
+                    "/api/v1/operator/status" => (
+                        "200 OK",
+                        r#"{"version":"v1.2.25","runtime":{"local_api_url":"http://127.0.0.1:45890"}}"#,
+                    ),
+                    "/api/v1/operator/jobs" => ("200 OK", r#"{"jobs":[{"job_id":"job_123","status":"done"}]}"#),
+                    "/api/v1/operator/logs?limit=200" => ("200 OK", r#"{"lines":["ok"]}"#),
+                    _ => ("404 Not Found", r#"{"error":"not_found"}"#),
+                };
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("build reqwest client");
+        let base_url = format!("http://{}", addr);
+        let (status, jobs, logs, diagnostics) =
+            fetch_runtime_snapshot_for_candidate(&client, &base_url).expect("fetch runtime snapshot");
+
+        assert_eq!(status["version"], "v1.2.25");
+        assert_eq!(jobs["jobs"][0]["job_id"], "job_123");
+        assert_eq!(logs["lines"][0], "ok");
+        assert!(diagnostics.is_none());
+        server.join().expect("join test server");
     }
 }

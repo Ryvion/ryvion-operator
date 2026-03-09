@@ -8,18 +8,15 @@ import {
   DEFAULT_LOCAL_API_URL,
   generateClaimCode,
   getConnectOnboardingLink,
-  getOperatorDiagnostics,
   getConnectStatus,
-  getOperatorJobs,
-  getOperatorLogs,
   getOperatorStats,
-  getOperatorStatus,
+  loadLocalRuntimeSnapshot,
   normalizeEndpoint,
-  probeLocalRuntime,
   runLocalRuntimeAction,
   getStoredHubUrl,
   getStoredLocalAPIUrl,
   login,
+  type LocalRuntimeAttempt,
   type LocalRuntimeProbeResponse,
   type OperatorDiagnosticsResponse,
   savePayoutPreference,
@@ -87,6 +84,7 @@ function App() {
   const [diagnostics, setDiagnostics] = useState<OperatorDiagnosticsResponse | null>(null)
   const [localError, setLocalError] = useState('')
   const [runtimeProbe, setRuntimeProbe] = useState<LocalRuntimeProbeResponse | null>(null)
+  const [runtimeAttempts, setRuntimeAttempts] = useState<LocalRuntimeAttempt[]>([])
   const [runtimeActionBusy, setRuntimeActionBusy] = useState<'restart' | 'repair' | null>(null)
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
@@ -154,7 +152,7 @@ function App() {
       nextLogs: string[],
       nextDiagnostics: OperatorDiagnosticsResponse | null,
       sourceUrl: string,
-      options?: { autodetected?: boolean },
+      options?: { autodetected?: boolean; probe?: LocalRuntimeProbeResponse | null; attempts?: LocalRuntimeAttempt[] },
     ) => {
       nextStatus.metrics = normalizeMetrics(nextStatus.metrics)
       setStatus(nextStatus)
@@ -162,7 +160,8 @@ function App() {
       setLogs(nextLogs)
       setDiagnostics(nextDiagnostics)
       setLocalError('')
-      setRuntimeProbe(null)
+      setRuntimeProbe(options?.probe ?? null)
+      setRuntimeAttempts(options?.attempts ?? [])
       setLastRefreshAt(new Date())
       if (normalizeEndpoint(localApiUrl) !== normalizeEndpoint(sourceUrl)) {
         setLocalApiUrl(sourceUrl)
@@ -180,58 +179,35 @@ function App() {
     [localApiUrl],
   )
 
-  const fetchLocalSnapshot = useCallback(async (baseUrl: string) => {
-    const [nextStatus, nextJobs, nextLogs, nextDiagnostics] = await Promise.all([
-      getOperatorStatus(baseUrl),
-      getOperatorJobs(baseUrl),
-      getOperatorLogs(200, baseUrl),
-      getOperatorDiagnostics(baseUrl).catch(() => null),
-    ])
-    return {
-      nextStatus,
-      nextJobs: nextJobs.jobs,
-      nextLogs: nextLogs.lines,
-      nextDiagnostics,
-    }
-  }, [])
-
   const refreshLocal = useCallback(async () => {
     try {
-      const snapshot = await fetchLocalSnapshot(localApiUrl)
-      applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, snapshot.nextDiagnostics, localApiUrl)
-    } catch (error) {
-      try {
-        const probe = await probeLocalRuntime(localApiUrl)
-        setRuntimeProbe(probe)
-        const candidateUrls = Array.from(
-          new Set(
-            [probe.suggested_api_url, probe.configured_api_url, DEFAULT_LOCAL_API_URL, localApiUrl]
-              .map((value) => value?.trim() || '')
-              .filter(Boolean),
-          ),
-        ).filter((value) => normalizeEndpoint(value) !== normalizeEndpoint(localApiUrl))
-
-        for (const candidate of candidateUrls) {
-          const isLikelyRuntime = normalizeEndpoint(candidate) === normalizeEndpoint(probe.suggested_api_url) ? probe.configured_api_port_open : true
-          if (!isLikelyRuntime) continue
-          try {
-            const snapshot = await fetchLocalSnapshot(candidate)
-            applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, snapshot.nextDiagnostics, candidate, { autodetected: true })
-            return
-          } catch {
-            // Try the next candidate.
-          }
-        }
-
-        setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
-      } catch {
-        setRuntimeProbe(null)
-        setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
+      const snapshot = await loadLocalRuntimeSnapshot(localApiUrl)
+      setRuntimeProbe(snapshot.probe ?? null)
+      setRuntimeAttempts(snapshot.attempts ?? [])
+      if (snapshot.ok && snapshot.status) {
+        applyLocalSnapshot(
+          snapshot.status,
+          snapshot.jobs?.jobs ?? [],
+          snapshot.logs?.lines ?? [],
+          snapshot.diagnostics ?? null,
+          snapshot.api_url || localApiUrl,
+          {
+            autodetected: snapshot.recovered,
+            probe: snapshot.probe,
+            attempts: snapshot.attempts,
+          },
+        )
+      } else {
+        setLocalError(snapshot.error || 'Failed to reach local operator API')
       }
+    } catch (error) {
+      setRuntimeProbe(null)
+      setRuntimeAttempts([])
+      setLocalError(error instanceof Error ? error.message : 'Failed to reach local operator API')
     } finally {
       setLoading(false)
     }
-  }, [applyLocalSnapshot, fetchLocalSnapshot, localApiUrl])
+  }, [applyLocalSnapshot, localApiUrl])
 
   const refreshCloud = useCallback(async () => {
     if (!cloudToken) {
@@ -665,6 +641,20 @@ function App() {
                     <div className="stack">
                       {runtimeProbe.binary_paths.map((path) => (
                         <MiniStat key={path} label="Binary" value={path} />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {runtimeAttempts.length ? (
+                  <div>
+                    <p className="eyebrow">Attempted endpoints</p>
+                    <div className="stack">
+                      {runtimeAttempts.map((attempt) => (
+                        <MiniStat
+                          key={`${attempt.api_url}:${attempt.ok ? 'ok' : 'err'}`}
+                          label={attempt.ok ? 'Connected' : 'Attempt'}
+                          value={attempt.ok ? attempt.api_url : `${attempt.api_url} — ${attempt.error || 'Failed'}`}
+                        />
                       ))}
                     </div>
                   </div>

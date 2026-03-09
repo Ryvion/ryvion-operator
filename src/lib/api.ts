@@ -133,6 +133,25 @@ export interface LocalRuntimeProbeResponse {
   notes: string[]
 }
 
+export interface LocalRuntimeAttempt {
+  api_url: string
+  ok: boolean
+  error?: string
+}
+
+export interface LocalRuntimeSnapshotResponse {
+  ok: boolean
+  api_url?: string
+  recovered: boolean
+  probe: LocalRuntimeProbeResponse
+  attempts: LocalRuntimeAttempt[]
+  status?: OperatorStatusResponse
+  jobs?: OperatorJobsResponse
+  logs?: OperatorLogsResponse
+  diagnostics?: OperatorDiagnosticsResponse | null
+  error?: string
+}
+
 export interface RuntimeActionResponse {
   launched: boolean
   message: string
@@ -330,6 +349,10 @@ export function generateClaimCode(baseUrl: string, token?: string) {
 
 export function probeLocalRuntime(baseUrl = getStoredLocalAPIUrl()) {
   return invoke<LocalRuntimeProbeResponse>('probe_local_runtime', { apiUrl: baseUrl })
+}
+
+export function loadLocalRuntimeSnapshot(baseUrl = getStoredLocalAPIUrl()) {
+  return invoke<LocalRuntimeSnapshotResponse>('load_local_runtime_snapshot', { apiUrl: baseUrl })
 }
 
 export function runLocalRuntimeAction(
