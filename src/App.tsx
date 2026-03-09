@@ -46,6 +46,14 @@ import {
 type ThemeMode = 'system' | 'light' | 'dark'
 type ViewKey = 'overview' | 'machine' | 'jobs' | 'earnings' | 'diagnostics' | 'settings'
 type NoticeTone = 'good' | 'warn' | 'neutral'
+type WorkloadReadiness = {
+  name: string
+  ready: boolean
+  reason: string
+  requirements: string[]
+  blockers: string[]
+  recommended?: string
+}
 
 type CloudFormState = {
   name: string
@@ -254,10 +262,14 @@ function App() {
     return alerts.slice(0, 4)
   }, [status, updateAvailable])
 
-  const workloadMatrix = useMemo(() => {
+  const workloadMatrix = useMemo<WorkloadReadiness[]>(() => {
     const runtime = status?.runtime
     const machine = status?.machine
     if (!runtime || !machine) return []
+    const declaredCountry = Boolean(status?.declared_country)
+    const gpuModel = stringsPresent(machine.gpu_model)
+    const vramGB = bytesToGB(machine.vram_bytes)
+    const ramGB = bytesToGB(machine.ram_bytes)
     return [
       {
         name: 'Gateway inference',
@@ -267,28 +279,58 @@ function App() {
           : runtime.docker_ready
             ? 'Container runtime is ready for gateway-backed jobs.'
             : 'Requires a healthy native runtime or Docker daemon.',
+        requirements: ['Native model or Docker runtime', 'Stable CPU/RAM headroom'],
+        blockers: [
+          ...(runtime.native_inference_ready || runtime.docker_ready ? [] : ['Neither native inference nor Docker is ready']),
+        ],
+        recommended: runtime.native_inference_ready ? 'Keep the native model loaded for the lowest-latency gateway path.' : 'Bring Docker or the native model path online.',
       },
       {
         name: 'Embeddings pipeline',
         ready: runtime.native_inference_ready || runtime.docker_ready,
         reason: 'Runs through either the native model or the container path.',
+        requirements: ['Native model or Docker runtime', 'At least 8 GB system RAM'],
+        blockers: [
+          ...(runtime.native_inference_ready || runtime.docker_ready ? [] : ['No eligible execution path is ready']),
+          ...(ramGB >= 8 ? [] : ['System RAM below the practical embeddings floor']),
+        ],
+        recommended: 'Embeddings remain more stable when Docker is available and system memory is not saturated.',
       },
       {
         name: 'Video transcode',
         ready: runtime.docker_ready,
         reason: runtime.docker_ready ? 'Docker is available for FFmpeg workloads.' : 'Requires Docker runtime availability.',
+        requirements: ['Docker runtime', 'At least 8 GB free disk or scratch space'],
+        blockers: [
+          ...(runtime.docker_ready ? [] : ['Docker daemon is not reachable']),
+          ...((runtime.disk_gb ?? 0) >= 8 ? [] : ['Less than 8 GB scratch capacity reported by health checks']),
+        ],
+        recommended: 'Keep Docker running before login so transcode jobs can land immediately after heartbeat.',
       },
       {
         name: 'Spatial stages',
         ready: runtime.spatial_ready,
         reason: runtime.spatial_ready ? 'Spatial stage checks are green.' : 'Requires certified runtime and spatial toolchain support.',
+        requirements: ['Spatial toolchain ready', 'GPU present', '12 GB VRAM preferred'],
+        blockers: [
+          ...(runtime.spatial_ready ? [] : ['Spatial runtime checks are not green']),
+          ...(gpuModel ? [] : ['No GPU detected for spatial workloads']),
+          ...(vramGB >= 12 ? [] : ['VRAM below the preferred spatial threshold']),
+        ],
+        recommended: 'Use certified GPU hosts for spatial stages; laptop-only posture is usually insufficient.',
       },
       {
         name: 'Sovereign pool',
-        ready: Boolean(status?.declared_country && status?.registered),
+        ready: Boolean(declaredCountry && status?.registered),
         reason: status?.declared_country
           ? 'Declared country is present. Final eligibility remains policy-controlled by the hub.'
           : 'Declare country and clear policy review before sovereign workloads become eligible.',
+        requirements: ['Declared country', 'Registered node', 'Policy approval on the hub'],
+        blockers: [
+          ...(declaredCountry ? [] : ['Declared country is missing']),
+          ...(status?.registered ? [] : ['Node is not registered on the control plane']),
+        ],
+        recommended: 'Use a stable non-proxy network and declare country before pursuing sovereign routing.',
       },
     ]
   }, [status])
@@ -516,7 +558,7 @@ function App() {
               />
             ) : null}
             {activeView === 'machine' ? <MachineView status={status} workloadMatrix={workloadMatrix} /> : null}
-            {activeView === 'jobs' ? <JobsView currentJob={currentJob} jobs={jobs} onCopy={handleCopy} /> : null}
+            {activeView === 'jobs' ? <JobsView currentJob={currentJob} jobs={jobs} onCopy={handleCopy} onOpenExternal={openExternal} /> : null}
             {activeView === 'earnings' ? (
               <EarningsView
                 status={status}
@@ -720,9 +762,11 @@ function OverviewView({
   )
 }
 
-function MachineView({ status, workloadMatrix }: { status: OperatorStatusResponse; workloadMatrix: Array<{ name: string; ready: boolean; reason: string }> }) {
+function MachineView({ status, workloadMatrix }: { status: OperatorStatusResponse; workloadMatrix: WorkloadReadiness[] }) {
   const metrics = status.metrics
   const freeRam = status.machine.ram_bytes ? Math.round(status.machine.ram_bytes * (1 - (metrics.mem_util ?? 0) / 100)) : 0
+  const freeVRAM = status.machine.vram_bytes ? Math.round(status.machine.vram_bytes * (1 - (metrics.gpu_util ?? 0) / 100)) : 0
+  const cpuHeadroom = Math.max(0, 100 - (metrics.cpu_util ?? 0))
   return (
     <div className="view-grid">
       <section className="metric-grid metric-grid--four">
@@ -732,34 +776,84 @@ function MachineView({ status, workloadMatrix }: { status: OperatorStatusRespons
         <MetricCard title="Disk posture" value={status.runtime.disk_gb ? `${status.runtime.disk_gb} GB` : '—'} detail={status.runtime.status_message || 'Derived from health report tokens.'} />
       </section>
 
-      <section className="panel">
+      <section className="panel panel-span-2">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Machine load</p>
-            <h2>Live headroom</h2>
+            <p className="eyebrow">Resource headroom</p>
+            <h2>Live operating capacity</h2>
           </div>
         </div>
-        <LoadRow label="CPU" value={metrics.cpu_util ?? 0} />
-        <LoadRow label="Memory" value={metrics.mem_util ?? 0} />
-        <LoadRow label="GPU" value={metrics.gpu_util ?? 0} />
-        <LoadRow label="Power" value={(metrics.power_watts ?? 0) / 5} text={`${(metrics.power_watts ?? 0).toFixed(0)} W`} />
+        <div className="capacity-grid">
+          <div className="mini-stat">
+            <span>CPU headroom</span>
+            <strong>{formatPercent(cpuHeadroom)}</strong>
+          </div>
+          <div className="mini-stat">
+            <span>RAM free</span>
+            <strong>{formatBytes(freeRam)}</strong>
+          </div>
+          <div className="mini-stat">
+            <span>VRAM free</span>
+            <strong>{status.machine.vram_bytes ? formatBytes(freeVRAM) : '—'}</strong>
+          </div>
+          <div className="mini-stat">
+            <span>Power draw</span>
+            <strong>{metrics.power_watts ? `${metrics.power_watts.toFixed(0)} W` : '—'}</strong>
+          </div>
+        </div>
+        <div className="runtime-checks top-gap">
+          <LoadRow label="CPU" value={metrics.cpu_util ?? 0} />
+          <LoadRow label="Memory" value={metrics.mem_util ?? 0} />
+          <LoadRow label="GPU" value={metrics.gpu_util ?? 0} />
+          <LoadRow label="Power" value={(metrics.power_watts ?? 0) / 5} text={`${(metrics.power_watts ?? 0).toFixed(0)} W`} />
+        </div>
       </section>
 
       <section className="panel panel-span-2">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Eligibility matrix</p>
-            <h2>What this machine can run right now</h2>
+            <p className="eyebrow">Workload readiness</p>
+            <h2>What this machine can run and why</h2>
           </div>
         </div>
-        <div className="matrix-list">
+        <div className="workload-card-grid">
           {workloadMatrix.map((item) => (
-            <article key={item.name} className="matrix-item">
+            <article key={item.name} className="workload-card">
               <div>
-                <strong>{item.name}</strong>
+                <div className="panel-header panel-header--tight">
+                  <strong>{item.name}</strong>
+                  <StatusPill tone={item.ready ? 'good' : 'neutral'}>{item.ready ? 'Eligible' : 'Not ready'}</StatusPill>
+                </div>
                 <p>{item.reason}</p>
+                <div className="stack top-gap">
+                  <div>
+                    <p className="eyebrow">Requirements</p>
+                    <div className="chip-list">
+                      {item.requirements.map((requirement) => (
+                        <span key={requirement} className="requirement-chip">{requirement}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="eyebrow">{item.blockers.length ? 'Current blockers' : 'Blockers'}</p>
+                    {item.blockers.length ? (
+                      <ul className="bullet-list">
+                        {item.blockers.map((blocker) => (
+                          <li key={blocker}>{blocker}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="support-copy">No active blockers are reported for this workload class.</p>
+                    )}
+                  </div>
+                  {item.recommended ? (
+                    <div>
+                      <p className="eyebrow">Recommended action</p>
+                      <p className="support-copy">{item.recommended}</p>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-              <StatusPill tone={item.ready ? 'good' : 'neutral'}>{item.ready ? 'Eligible' : 'Not ready'}</StatusPill>
             </article>
           ))}
         </div>
@@ -768,7 +862,17 @@ function MachineView({ status, workloadMatrix }: { status: OperatorStatusRespons
   )
 }
 
-function JobsView({ currentJob, jobs, onCopy }: { currentJob: OperatorJob | null; jobs: OperatorJob[]; onCopy: (value: string, message: string) => void }) {
+function JobsView({
+  currentJob,
+  jobs,
+  onCopy,
+  onOpenExternal,
+}: {
+  currentJob: OperatorJob | null
+  jobs: OperatorJob[]
+  onCopy: (value: string, message: string) => void
+  onOpenExternal: (url: string) => void
+}) {
   return (
     <div className="view-grid">
       <section className="panel panel-span-2">
@@ -800,9 +904,15 @@ function JobsView({ currentJob, jobs, onCopy }: { currentJob: OperatorJob | null
                   <td>{formatDateTime(job.started_at)}</td>
                   <td>{formatDuration(job.duration_ms)}</td>
                   <td>
-                    {job.result_hash_hex ? (
-                      <button className="text-button" onClick={() => void onCopy(job.result_hash_hex!, 'Copied result hash.')}>Copy hash</button>
-                    ) : '—'}
+                    <div className="inline-actions inline-actions--tight">
+                      {job.result_hash_hex ? (
+                        <button className="text-button" onClick={() => void onCopy(job.result_hash_hex!, 'Copied result hash.')}>Copy hash</button>
+                      ) : null}
+                      {job.blob_url ? (
+                        <button className="text-button" onClick={() => void onOpenExternal(job.blob_url!)}>Open result</button>
+                      ) : null}
+                      {!job.result_hash_hex && !job.blob_url ? '—' : null}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -825,6 +935,11 @@ function JobsView({ currentJob, jobs, onCopy }: { currentJob: OperatorJob | null
             <MiniStat label="Started" value={formatDateTime(currentJob.started_at)} />
             <MiniStat label="Duration" value={formatDuration(currentJob.duration_ms)} />
             <MiniStat label="Blob" value={currentJob.blob_url ? 'Uploaded' : 'None'} />
+            <MiniStat label="Exit code" value={currentJob.exit_code != null ? String(currentJob.exit_code) : '—'} />
+            <div className="inline-actions">
+              {currentJob.blob_url ? <button className="ghost-button" onClick={() => void onOpenExternal(currentJob.blob_url!)}>Open result</button> : null}
+              {currentJob.result_hash_hex ? <button className="ghost-button" onClick={() => void onCopy(currentJob.result_hash_hex!, 'Copied result hash.')}>Copy result hash</button> : null}
+            </div>
           </div>
         ) : (
           <div className="empty-state compact-empty">
@@ -1258,6 +1373,15 @@ function ThemeToggle({ value, onChange }: { value: ThemeMode; onChange: (theme: 
       </select>
     </label>
   )
+}
+
+function stringsPresent(value?: string | null) {
+  return Boolean(value && value.trim())
+}
+
+function bytesToGB(value?: number | null) {
+  if (!value || value <= 0) return 0
+  return value / (1024 ** 3)
 }
 
 export default App

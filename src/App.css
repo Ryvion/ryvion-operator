@@ -369,6 +369,10 @@ label span {
   margin-bottom: 18px;
 }
 
+.panel-header--tight {
+  margin-bottom: 10px;
+}
+
 .panel-header h2 {
   margin: 6px 0 0;
   font-size: 1.42rem;
@@ -424,6 +428,10 @@ label span {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.inline-actions--tight {
+  gap: 10px;
 }
 
 .top-gap {
@@ -538,6 +546,52 @@ label span {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-top: 16px;
+}
+
+.capacity-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.workload-card-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workload-card {
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.requirement-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 0.86rem;
+}
+
+.bullet-list {
+  margin: 10px 0 0 18px;
+  padding: 0;
+  color: var(--text-soft);
+  display: grid;
+  gap: 8px;
 }
 
 .mini-stat {
@@ -655,7 +709,9 @@ label span {
 
   .metric-grid--four,
   .job-meta-grid,
-  .form-grid {
+  .form-grid,
+  .capacity-grid,
+  .workload-card-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -686,7 +742,9 @@ label span {
 
   .job-meta-grid,
   .metric-grid--four,
-  .form-grid {
+  .form-grid,
+  .capacity-grid,
+  .workload-card-grid {
     grid-template-columns: 1fr;
   }
 }
