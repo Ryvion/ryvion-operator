@@ -61,3 +61,11 @@ jobs:
           releaseBody: Desktop operator application for Ryvion node management.
           releaseDraft: false
           prerelease: false
+
+      - name: Generate checksums
+        run: python .github/scripts/release_checksums.py "${{ matrix.platform }}"
+
+      - name: Upload checksum asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "SHA256SUMS-${{ matrix.platform }}.txt" --clobber
