@@ -14,6 +14,7 @@ import {
   getOperatorStats,
   getOperatorStatus,
   probeLocalRuntime,
+  runLocalRuntimeAction,
   getStoredHubUrl,
   getStoredLocalAPIUrl,
   login,
@@ -82,6 +83,7 @@ function App() {
   const [logs, setLogs] = useState<string[]>([])
   const [localError, setLocalError] = useState('')
   const [runtimeProbe, setRuntimeProbe] = useState<LocalRuntimeProbeResponse | null>(null)
+  const [runtimeActionBusy, setRuntimeActionBusy] = useState<'restart' | 'repair' | null>(null)
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
@@ -450,6 +452,22 @@ function App() {
     }
   }, [])
 
+  const handleRuntimeAction = useCallback(async (action: 'restart' | 'repair') => {
+    setRuntimeActionBusy(action)
+    setActionError('')
+    try {
+      const response = await runLocalRuntimeAction(action, localApiUrl, status?.hub_url || hubUrl || DEFAULT_HUB_URL)
+      setActionMessage(response.message)
+      window.setTimeout(() => {
+        void refreshLocal()
+      }, action === 'repair' ? 5000 : 2500)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to run local runtime action')
+    } finally {
+      setRuntimeActionBusy(null)
+    }
+  }, [hubUrl, localApiUrl, refreshLocal, status?.hub_url])
+
   const handleRefreshConnectStatus = useCallback(async () => {
     if (!connectAccountId) return
     setActionError('')
@@ -580,6 +598,22 @@ function App() {
                   </div>
                 ) : null}
                 <div className="inline-actions">
+                  {runtimeProbe.service_installed ? (
+                    <button
+                      className="primary-button"
+                      onClick={() => void handleRuntimeAction('restart')}
+                      disabled={runtimeActionBusy !== null}
+                    >
+                      {runtimeActionBusy === 'restart' ? 'Restarting…' : 'Restart service'}
+                    </button>
+                  ) : null}
+                  <button
+                    className="ghost-button"
+                    onClick={() => void handleRuntimeAction('repair')}
+                    disabled={runtimeActionBusy !== null}
+                  >
+                    {runtimeActionBusy === 'repair' ? 'Opening installer…' : 'Run repair installer'}
+                  </button>
                   <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.install_command, 'Copied install command.')}>Copy install command</button>
                   {runtimeProbe.start_command ? <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.start_command!, 'Copied start command.')}>Copy start command</button> : null}
                   {runtimeProbe.log_command ? <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.log_command!, 'Copied log command.')}>Copy log command</button> : null}

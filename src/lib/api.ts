@@ -97,6 +97,11 @@ export interface LocalRuntimeProbeResponse {
   notes: string[]
 }
 
+export interface RuntimeActionResponse {
+  launched: boolean
+  message: string
+}
+
 export interface LoginResponse {
   token: string
   buyer_id: string
@@ -278,4 +283,16 @@ export function generateClaimCode(baseUrl: string, token?: string) {
 
 export function probeLocalRuntime(baseUrl = getStoredLocalAPIUrl()) {
   return invoke<LocalRuntimeProbeResponse>('probe_local_runtime', { apiUrl: baseUrl })
+}
+
+export function runLocalRuntimeAction(
+  action: 'restart' | 'repair',
+  baseUrl = getStoredLocalAPIUrl(),
+  hubUrl = getStoredHubUrl(),
+) {
+  return invoke<RuntimeActionResponse>('run_local_runtime_action', {
+    action,
+    apiUrl: baseUrl,
+    hubUrl,
+  })
 }

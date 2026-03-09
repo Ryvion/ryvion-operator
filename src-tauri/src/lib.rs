@@ -24,6 +24,12 @@ struct LocalRuntimeProbe {
     notes: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct RuntimeActionResult {
+    launched: bool,
+    message: String,
+}
+
 #[tauri::command]
 fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
     let (host, port) = parse_host_port(&api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
@@ -59,6 +65,24 @@ fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
         log_command: None,
         notes: vec!["Runtime probe is not implemented for this platform.".to_string()],
     }
+}
+
+#[tauri::command]
+fn run_local_runtime_action(action: String, api_url: String, hub_url: Option<String>) -> Result<RuntimeActionResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return run_macos_runtime_action(&action, &api_url, hub_url.as_deref());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return run_linux_runtime_action(&action, &api_url, hub_url.as_deref());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return run_windows_runtime_action(&action, hub_url.as_deref());
+    }
+    #[allow(unreachable_code)]
+    Err(format!("runtime action '{}' is not supported on {}", action, env::consts::OS))
 }
 
 #[cfg(target_os = "macos")]
@@ -121,6 +145,64 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     }
 }
 
+#[cfg(target_os = "macos")]
+fn run_macos_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) -> Result<RuntimeActionResult, String> {
+    let home = env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let plist = PathBuf::from(&home).join("Library/LaunchAgents/com.ryvion.node.plist");
+    let uid = command_output("id", &["-u"]);
+    let service_label = format!("gui/{}/com.ryvion.node", uid.trim());
+
+    match action {
+        "restart" => {
+            if !plist.exists() {
+                return Err("Launch agent is not installed yet. Run the repair installer first.".to_string());
+            }
+            let plist_string = plist.display().to_string();
+            let bootstrap = Command::new("launchctl")
+                .args(["bootstrap", &format!("gui/{}", uid.trim()), &plist_string])
+                .status();
+            if let Ok(status) = bootstrap {
+                if !status.success() {
+                    let _ = Command::new("launchctl").args(["load", &plist_string]).status();
+                }
+            }
+            let status = Command::new("launchctl")
+                .args(["kickstart", "-k", &service_label])
+                .status()
+                .map_err(|err| format!("Failed to restart launch agent: {err}"))?;
+            if !status.success() {
+                return Err("launchctl did not restart the Ryvion node service.".to_string());
+            }
+            let (_, port) = parse_host_port(api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
+            return Ok(RuntimeActionResult {
+                launched: true,
+                message: format!("Requested launchctl restart. Re-check http://127.0.0.1:{port}/healthz in a few seconds."),
+            });
+        }
+        "repair" => {
+            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://ryvion-hub.fly.dev");
+            let script = format!("curl -sSL '{}/install.sh?platform=macos' | bash", hub.trim_end_matches('/'));
+            let apple_script = format!(
+                "tell application \"Terminal\" to do script \"{}\"\nactivate application \"Terminal\"",
+                escape_applescript(&script)
+            );
+            let status = Command::new("osascript")
+                .arg("-e")
+                .arg(apple_script)
+                .status()
+                .map_err(|err| format!("Failed to launch Terminal repair flow: {err}"))?;
+            if !status.success() {
+                return Err("Terminal did not start the repair installer.".to_string());
+            }
+            return Ok(RuntimeActionResult {
+                launched: true,
+                message: "Opened Terminal with the Ryvion macOS installer. Follow any password prompts, then refresh the app.".to_string(),
+            });
+        }
+        _ => Err(format!("Unsupported runtime action: {action}")),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) -> LocalRuntimeProbe {
     let home = env::var("HOME").unwrap_or_default();
@@ -177,6 +259,24 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
     }
 }
 
+#[cfg(target_os = "linux")]
+fn run_linux_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) -> Result<RuntimeActionResult, String> {
+    let (_, port) = parse_host_port(api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
+    let command = match action {
+        "restart" => format!("sudo systemctl restart ryvion-node; echo; curl -fsS http://127.0.0.1:{port}/healthz || true; echo; read -n 1 -s -r -p 'Press any key to close'"),
+        "repair" => {
+            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://ryvion-hub.fly.dev");
+            format!("curl -sSL '{}/install.sh' | bash; echo; read -n 1 -s -r -p 'Press any key to close'", hub.trim_end_matches('/'))
+        }
+        _ => return Err(format!("Unsupported runtime action: {action}")),
+    };
+    launch_linux_terminal(&command)?;
+    Ok(RuntimeActionResult {
+        launched: true,
+        message: "Opened a terminal to run the requested runtime action.".to_string(),
+    })
+}
+
 #[cfg(target_os = "windows")]
 fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) -> LocalRuntimeProbe {
     let program_files = env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
@@ -228,6 +328,33 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
     }
 }
 
+#[cfg(target_os = "windows")]
+fn run_windows_runtime_action(action: &str, hub_url: Option<&str>) -> Result<RuntimeActionResult, String> {
+    let command = match action {
+        "restart" => "Start-Service RyvionNode".to_string(),
+        "repair" => {
+            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://ryvion-hub.fly.dev");
+            format!("iex ((New-Object System.Net.WebClient).DownloadString('{}/install.ps1'))", hub.trim_end_matches('/'))
+        }
+        _ => return Err(format!("Unsupported runtime action: {action}")),
+    };
+    let powershell_args = format!(
+        "Start-Process PowerShell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-Command',\"{}\"",
+        command.replace('"', "\\\"")
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-Command", powershell_args.as_str()])
+        .status()
+        .map_err(|err| format!("Failed to launch PowerShell repair flow: {err}"))?;
+    if !status.success() {
+        return Err("PowerShell did not start the requested runtime action.".to_string());
+    }
+    Ok(RuntimeActionResult {
+        launched: true,
+        message: "Opened an elevated PowerShell window to run the requested runtime action.".to_string(),
+    })
+}
+
 fn parse_host_port(api_url: &str) -> Option<(String, u16)> {
     let trimmed = api_url.trim();
     let without_scheme = trimmed
@@ -265,6 +392,15 @@ fn command_output(cmd: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
+fn command_success(cmd: &str, args: &[&str]) -> bool {
+    Command::new(cmd)
+        .args(args)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn existing_paths(paths: Vec<String>) -> Vec<String> {
     paths
         .into_iter()
@@ -274,6 +410,11 @@ fn existing_paths(paths: Vec<String>) -> Vec<String> {
 
 fn binary_help_contains(path: &str, needle: &str) -> bool {
     command_output(path, &["-h"]).contains(needle)
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(target_os = "macos")]
@@ -294,11 +435,30 @@ fn extract_systemd_exec_start(contents: &str) -> Option<String> {
         .and_then(|value| value.split_whitespace().next().map(|token| token.to_string()))
 }
 
+#[cfg(target_os = "linux")]
+fn launch_linux_terminal(command: &str) -> Result<(), String> {
+    let candidates: [(&str, &[&str]); 5] = [
+        ("x-terminal-emulator", &["-e", "bash", "-lc"]),
+        ("gnome-terminal", &["--", "bash", "-lc"]),
+        ("konsole", &["-e", "bash", "-lc"]),
+        ("alacritty", &["-e", "bash", "-lc"]),
+        ("kitty", &["bash", "-lc"]),
+    ];
+    for (program, prefix) in candidates {
+        let mut cmd = Command::new(program);
+        cmd.args(prefix).arg(command);
+        if cmd.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("Could not find a supported terminal emulator. Copy the command from diagnostics and run it manually.".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![probe_local_runtime])
+        .invoke_handler(tauri::generate_handler![probe_local_runtime, run_local_runtime_action])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
