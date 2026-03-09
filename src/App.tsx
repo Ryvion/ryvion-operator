@@ -33,6 +33,7 @@ import {
 } from './lib/format'
 import {
   clearCloudAuth,
+  type CloudAuthUser,
   readCloudToken,
   readCloudUser,
   readStoredValue,
@@ -44,6 +45,7 @@ import {
 
 type ThemeMode = 'system' | 'light' | 'dark'
 type ViewKey = 'overview' | 'machine' | 'jobs' | 'earnings' | 'diagnostics' | 'settings'
+type NoticeTone = 'good' | 'warn' | 'neutral'
 
 type CloudFormState = {
   name: string
@@ -206,6 +208,52 @@ function App() {
     return 'healthy'
   }, [status])
 
+  const updateAvailable = useMemo(
+    () => Boolean(status?.latest_version && status.latest_version !== status.version),
+    [status],
+  )
+
+  const runtimeAlerts = useMemo<Array<{ tone: NoticeTone; title: string; message: string }>>(() => {
+    if (!status) return []
+    const alerts: Array<{ tone: NoticeTone; title: string; message: string }> = []
+    if (updateAvailable) {
+      alerts.push({
+        tone: 'warn',
+        title: 'Runtime update available',
+        message: `Installed ${status.version}. Latest published node runtime is ${status.latest_version}.`,
+      })
+    }
+    if (status.register_error) {
+      alerts.push({
+        tone: 'warn',
+        title: 'Registration issue',
+        message: status.register_error,
+      })
+    }
+    if (status.last_heartbeat_error) {
+      alerts.push({
+        tone: 'warn',
+        title: 'Heartbeat degraded',
+        message: status.last_heartbeat_error,
+      })
+    }
+    if (!status.runtime.docker_ready) {
+      alerts.push({
+        tone: 'neutral',
+        title: 'Container workloads unavailable',
+        message: 'Docker is not reachable, so media, embedding, and other OCI workloads cannot land on this node.',
+      })
+    }
+    if (!status.declared_country) {
+      alerts.push({
+        tone: 'neutral',
+        title: 'Declared country missing',
+        message: 'Country-restricted policy paths require a declared country and higher-trust posture on the control plane.',
+      })
+    }
+    return alerts.slice(0, 4)
+  }, [status, updateAvailable])
+
   const workloadMatrix = useMemo(() => {
     const runtime = status?.runtime
     const machine = status?.machine
@@ -350,6 +398,18 @@ function App() {
     }
   }, [])
 
+  const handleRefreshConnectStatus = useCallback(async () => {
+    if (!connectAccountId) return
+    setActionError('')
+    try {
+      const latest = await getConnectStatus(connectAccountId, localApiUrl)
+      setConnectOnboarded(latest.onboarded)
+      setActionMessage(latest.onboarded ? 'Payout account is onboarded.' : 'Payout account still requires onboarding.')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to refresh payout status')
+    }
+  }, [connectAccountId, localApiUrl])
+
   const signOut = useCallback(() => {
     clearCloudAuth()
     setCloudToken('')
@@ -449,7 +509,10 @@ function App() {
                 jobs={jobs}
                 cloudStats={cloudStats}
                 lastRefreshAt={lastRefreshAt}
+                runtimeAlerts={runtimeAlerts}
+                updateAvailable={updateAvailable}
                 onCopy={handleCopy}
+                onOpenExternal={openExternal}
               />
             ) : null}
             {activeView === 'machine' ? <MachineView status={status} workloadMatrix={workloadMatrix} /> : null}
@@ -484,6 +547,7 @@ function App() {
                 onCreateConnect={handleCreateConnect}
                 onOpenOnboarding={handleOpenOnboarding}
                 onSavePayout={handleSavePayout}
+                onRefreshConnectStatus={handleRefreshConnectStatus}
                 onCopy={handleCopy}
                 onSignOut={signOut}
               />
@@ -495,6 +559,7 @@ function App() {
                 localApiUrl={localApiUrl}
                 onCopy={handleCopy}
                 onOpenExternal={openExternal}
+                updateAvailable={updateAvailable}
               />
             ) : null}
             {activeView === 'settings' ? (
@@ -522,14 +587,20 @@ function OverviewView({
   jobs,
   cloudStats,
   lastRefreshAt,
+  runtimeAlerts,
+  updateAvailable,
   onCopy,
+  onOpenExternal,
 }: {
   status: OperatorStatusResponse
   currentJob: OperatorJob | null
   jobs: OperatorJob[]
   cloudStats: OperatorStatsResponse | null
   lastRefreshAt: Date | null
+  runtimeAlerts: Array<{ tone: NoticeTone; title: string; message: string }>
+  updateAvailable: boolean
   onCopy: (value: string, message: string) => void
+  onOpenExternal: (url: string) => void
 }) {
   const metrics = status.metrics
   return (
@@ -577,6 +648,35 @@ function OverviewView({
           <CheckRow label="Container runtime" state={status.runtime.docker_ready} />
           <CheckRow label="GPU runtime" state={status.runtime.docker_gpu_enabled || status.runtime.gpu_ready} />
           <CheckRow label="Native inference" state={status.runtime.native_inference_ready} detail={status.runtime.native_model || 'No native model loaded'} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Operator posture</p>
+            <h2>Current blockers and actions</h2>
+          </div>
+          {updateAvailable ? <StatusPill tone="warn">Update available</StatusPill> : null}
+        </div>
+        {runtimeAlerts.length ? (
+          <div className="notice-stack">
+            {runtimeAlerts.map((alert) => (
+              <Notice key={alert.title} tone={alert.tone}>
+                <strong>{alert.title}</strong>
+                <p>{alert.message}</p>
+              </Notice>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state compact-empty">
+            <h3>No immediate blockers</h3>
+            <p>The node is in a clean state for its current workload class and policy posture.</p>
+          </div>
+        )}
+        <div className="inline-actions top-gap">
+          <button className="ghost-button" onClick={() => void onOpenExternal('https://ryvion.ai/status')}>Check runtime status</button>
+          <button className="ghost-button" onClick={() => void onOpenExternal('https://ryvion.ai/operators')}>Open operator guide</button>
         </div>
       </section>
 
@@ -740,7 +840,7 @@ function JobsView({ currentJob, jobs, onCopy }: { currentJob: OperatorJob | null
 function EarningsView(props: {
   status: OperatorStatusResponse
   cloudToken: string
-  cloudUser: { name: string; email: string } | null
+  cloudUser: CloudAuthUser | null
   cloudStats: OperatorStatsResponse | null
   cloudMode: 'login' | 'signup'
   cloudForm: CloudFormState
@@ -766,6 +866,7 @@ function EarningsView(props: {
   onCreateConnect: () => void
   onOpenOnboarding: () => void
   onSavePayout: () => void
+  onRefreshConnectStatus: () => void
   onCopy: (value: string, message: string) => void
   onSignOut: () => void
 }) {
@@ -798,6 +899,7 @@ function EarningsView(props: {
     onCreateConnect,
     onOpenOnboarding,
     onSavePayout,
+    onRefreshConnectStatus,
     onCopy,
     onSignOut,
   } = props
@@ -823,7 +925,11 @@ function EarningsView(props: {
           <div className="stack">
             <MiniStat label="Operator" value={cloudUser.name} />
             <MiniStat label="Email" value={cloudUser.email} />
-            <button className="ghost-button" onClick={onSignOut}>Sign out</button>
+            {cloudUser.api_key ? <MiniStat label="API key" value={cloudUser.api_key} /> : null}
+            <div className="inline-actions">
+              {cloudUser.api_key ? <button className="ghost-button" onClick={() => onCopy(cloudUser.api_key!, 'Copied buyer API key.')}>Copy API key</button> : null}
+              <button className="ghost-button" onClick={onSignOut}>Sign out</button>
+            </div>
           </div>
         ) : (
           <div className="auth-form">
@@ -905,6 +1011,7 @@ function EarningsView(props: {
         <div className="inline-actions">
           <button className="ghost-button" onClick={onCreateConnect} disabled={!connectEmail.trim()}>Create account</button>
           <button className="ghost-button" onClick={onOpenOnboarding} disabled={!connectAccountId}>Open onboarding</button>
+          <button className="ghost-button" onClick={onRefreshConnectStatus} disabled={!connectAccountId}>Refresh status</button>
           <button className="primary-button" onClick={onSavePayout} disabled={!connectAccountId}>Save payout</button>
         </div>
       </section>
@@ -953,12 +1060,14 @@ function DiagnosticsView({
   localApiUrl,
   onCopy,
   onOpenExternal,
+  updateAvailable,
 }: {
   status: OperatorStatusResponse
   logs: string[]
   localApiUrl: string
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
+  updateAvailable: boolean
 }) {
   return (
     <div className="view-grid">
@@ -977,7 +1086,26 @@ function DiagnosticsView({
         </dl>
         <div className="inline-actions">
           <button className="ghost-button" onClick={() => onCopy(status.public_key_hex, 'Copied node public key.')}>Copy public key</button>
+          <button className="ghost-button" onClick={() => onCopy(logs.join('\n'), 'Copied log tail.')}>Copy logs</button>
+          <button className="ghost-button" onClick={() => void onOpenExternal(`${localApiUrl}/healthz`)}>Open local health</button>
+          <button className="ghost-button" onClick={() => void onOpenExternal(`${status.hub_url}/healthz`)}>Open hub health</button>
           <button className="ghost-button" onClick={() => void onOpenExternal('https://ryvion.ai/status')}>Open network status</button>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Error state</p>
+            <h2>Latest operator issues</h2>
+          </div>
+        </div>
+        <div className="stack">
+          <MiniStat label="Register" value={status.register_error || 'Clear'} />
+          <MiniStat label="Heartbeat" value={status.last_heartbeat_error || 'Clear'} />
+          <MiniStat label="Claim" value={status.last_claim_error || 'Clear'} />
+          <MiniStat label="Payout" value={status.last_payout_error || 'Clear'} />
+          <MiniStat label="Runtime version" value={`${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}`} />
         </div>
       </section>
 

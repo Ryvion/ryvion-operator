@@ -294,6 +294,11 @@ label span {
   background: var(--panel);
 }
 
+.notice strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
 .notice--good {
   border-color: rgba(27, 127, 71, 0.22);
   background: var(--good-soft);
@@ -419,6 +424,10 @@ label span {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.top-gap {
+  margin-top: 16px;
 }
 
 .ghost-button,
@@ -549,6 +558,7 @@ label span {
 .mini-stat strong {
   display: block;
   margin-top: 8px;
+  overflow-wrap: anywhere;
 }
 
 .load-row {
