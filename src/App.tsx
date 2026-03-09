@@ -49,6 +49,18 @@ import {
 type ThemeMode = 'system' | 'light' | 'dark'
 type ViewKey = 'overview' | 'machine' | 'jobs' | 'earnings' | 'diagnostics' | 'settings'
 type NoticeTone = 'good' | 'warn' | 'neutral'
+type DoctorSeverity = 'high' | 'medium' | 'low'
+type DoctorActionKey =
+  | 'use-detected-endpoint'
+  | 'restart-service'
+  | 'repair-runtime'
+  | 'refresh-runtime'
+  | 'copy-install-command'
+  | 'copy-start-command'
+  | 'copy-log-command'
+  | 'open-operator-guide'
+  | 'open-local-health'
+  | 'open-hub-health'
 type WorkloadReadiness = {
   name: string
   ready: boolean
@@ -56,6 +68,14 @@ type WorkloadReadiness = {
   requirements: string[]
   blockers: string[]
   recommended?: string
+}
+type DoctorFinding = {
+  key: string
+  title: string
+  severity: DoctorSeverity
+  summary: string
+  detail?: string
+  actions: DoctorActionKey[]
 }
 
 type CloudFormState = {
@@ -604,94 +624,22 @@ function App() {
               The desktop app could not reach the local node API. Check that the service is running, or update the local API
               URL in settings if you changed the port.
             </p>
-            {runtimeProbe ? (
-              <div className="stack top-gap">
-                <div className="capacity-grid">
-                  <MiniStat label="API target" value={`${runtimeProbe.api_host}:${runtimeProbe.api_port}`} />
-                  <MiniStat label="Port reachability" value={runtimeProbe.api_port_open ? 'Listening' : 'Closed'} />
-                  <MiniStat label="Detected API" value={runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url} />
-                  <MiniStat label="Service" value={runtimeProbe.service_installed ? (runtimeProbe.service_running ? 'Running' : 'Installed') : 'Missing'} />
-                  <MiniStat label="Service config" value={runtimeProbe.service_configured_for_api ? 'API enabled' : 'Legacy'} />
-                  <MiniStat label="Runtime binary" value={runtimeProbe.binary_supports_local_api ? 'Current' : 'Legacy'} />
-                  <MiniStat label="Platform" value={runtimeProbe.platform} />
-                </div>
-                {runtimeProbe.api_url_mismatch ? (
-                  <Notice tone="neutral">
-                    <strong>Saved API target differs from the detected runtime endpoint.</strong>
-                    <p>
-                      Stored: {runtimeProbe.api_url}
-                      <br />
-                      Detected: {runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url}
-                    </p>
-                  </Notice>
-                ) : null}
-                {runtimeProbe.notes.length ? (
-                  <div>
-                    <p className="eyebrow">Diagnostics</p>
-                    <ul className="bullet-list">
-                      {runtimeProbe.notes.map((note) => (
-                        <li key={note}>{note}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-                {runtimeProbe.binary_paths.length ? (
-                  <div>
-                    <p className="eyebrow">Detected binaries</p>
-                    <div className="stack">
-                      {runtimeProbe.binary_paths.map((path) => (
-                        <MiniStat key={path} label="Binary" value={path} />
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {runtimeAttempts.length ? (
-                  <div>
-                    <p className="eyebrow">Attempted endpoints</p>
-                    <div className="stack">
-                      {runtimeAttempts.map((attempt) => (
-                        <MiniStat
-                          key={`${attempt.api_url}:${attempt.ok ? 'ok' : 'err'}`}
-                          label={attempt.ok ? 'Connected' : 'Attempt'}
-                          value={attempt.ok ? attempt.api_url : `${attempt.api_url} — ${attempt.error || 'Failed'}`}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                <div className="inline-actions">
-                  {runtimeProbe.api_url_mismatch ? (
-                    <button
-                      className="primary-button"
-                      onClick={() => setLocalApiUrl(runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url)}
-                      disabled={runtimeActionBusy !== null}
-                    >
-                      Use detected endpoint
-                    </button>
-                  ) : null}
-                  {runtimeProbe.service_installed ? (
-                    <button
-                      className="primary-button"
-                      onClick={() => void handleRuntimeAction('restart')}
-                      disabled={runtimeActionBusy !== null}
-                    >
-                      {runtimeActionBusy === 'restart' ? 'Restarting…' : 'Restart service'}
-                    </button>
-                  ) : null}
-                  <button
-                    className="ghost-button"
-                    onClick={() => void handleRuntimeAction('repair')}
-                    disabled={runtimeActionBusy !== null}
-                  >
-                    {runtimeActionBusy === 'repair' ? 'Opening installer…' : 'Run repair installer'}
-                  </button>
-                  <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.install_command, 'Copied install command.')}>Copy install command</button>
-                  {runtimeProbe.start_command ? <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.start_command!, 'Copied start command.')}>Copy start command</button> : null}
-                  {runtimeProbe.log_command ? <button className="ghost-button" onClick={() => void handleCopy(runtimeProbe.log_command!, 'Copied log command.')}>Copy log command</button> : null}
-                  <button className="ghost-button" onClick={() => void openExternal('https://ryvion.ai/operators')}>Open operator guide</button>
-                </div>
-              </div>
-            ) : null}
+            <RuntimeDoctorPanel
+              status={status}
+              hubUrl={hubUrl}
+              diagnostics={diagnostics}
+              runtimeProbe={runtimeProbe}
+              runtimeAttempts={runtimeAttempts}
+              localApiUrl={localApiUrl}
+              localError={localError}
+              updateAvailable={updateAvailable}
+              runtimeActionBusy={runtimeActionBusy}
+              onCopy={handleCopy}
+              onOpenExternal={openExternal}
+              onSetLocalApiUrl={setLocalApiUrl}
+              onRuntimeAction={handleRuntimeAction}
+              onRefreshRuntime={() => void refreshLocal()}
+            />
           </section>
         ) : null}
 
@@ -753,9 +701,16 @@ function App() {
             hubUrl={hubUrl}
             logs={logs}
             diagnostics={diagnostics}
+            runtimeProbe={runtimeProbe}
+            runtimeAttempts={runtimeAttempts}
             localApiUrl={localApiUrl}
+            localError={localError}
+            runtimeActionBusy={runtimeActionBusy}
             onCopy={handleCopy}
             onOpenExternal={openExternal}
+            onSetLocalApiUrl={setLocalApiUrl}
+            onRuntimeAction={handleRuntimeAction}
+            onRefreshRuntime={() => void refreshLocal()}
             updateAvailable={updateAvailable}
           />
         ) : null}
@@ -1338,22 +1293,53 @@ function DiagnosticsView({
   hubUrl,
   logs,
   diagnostics,
+  runtimeProbe,
+  runtimeAttempts,
   localApiUrl,
+  localError,
+  runtimeActionBusy,
   onCopy,
   onOpenExternal,
+  onSetLocalApiUrl,
+  onRuntimeAction,
+  onRefreshRuntime,
   updateAvailable,
 }: {
   status: OperatorStatusResponse | null
   hubUrl: string
   logs: string[]
   diagnostics: OperatorDiagnosticsResponse | null
+  runtimeProbe: LocalRuntimeProbeResponse | null
+  runtimeAttempts: LocalRuntimeAttempt[]
   localApiUrl: string
+  localError: string
+  runtimeActionBusy: 'restart' | 'repair' | null
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
+  onSetLocalApiUrl: (value: string) => void
+  onRuntimeAction: (action: 'restart' | 'repair') => void
+  onRefreshRuntime: () => void
   updateAvailable: boolean
 }) {
   return (
     <div className="view-grid">
+      <RuntimeDoctorPanel
+        status={status}
+        hubUrl={hubUrl}
+        diagnostics={diagnostics}
+        runtimeProbe={runtimeProbe}
+        runtimeAttempts={runtimeAttempts}
+        localApiUrl={localApiUrl}
+        localError={localError}
+        updateAvailable={updateAvailable}
+        runtimeActionBusy={runtimeActionBusy}
+        onCopy={onCopy}
+        onOpenExternal={onOpenExternal}
+        onSetLocalApiUrl={onSetLocalApiUrl}
+        onRuntimeAction={onRuntimeAction}
+        onRefreshRuntime={onRefreshRuntime}
+      />
+
       <section className="panel">
         <div className="panel-header">
           <div>
@@ -1381,7 +1367,7 @@ function DiagnosticsView({
         <div className="panel-header">
           <div>
             <p className="eyebrow">Error state</p>
-            <h2>Latest operator issues</h2>
+            <h2>Underlying runtime signals</h2>
           </div>
         </div>
         {diagnostics?.issues.length ? (
@@ -1453,6 +1439,230 @@ function DiagnosticsView({
       </section>
     </div>
   )
+}
+
+function RuntimeDoctorPanel({
+  status,
+  hubUrl,
+  diagnostics,
+  runtimeProbe,
+  runtimeAttempts,
+  localApiUrl,
+  localError,
+  updateAvailable,
+  runtimeActionBusy,
+  onCopy,
+  onOpenExternal,
+  onSetLocalApiUrl,
+  onRuntimeAction,
+  onRefreshRuntime,
+}: {
+  status: OperatorStatusResponse | null
+  hubUrl: string
+  diagnostics: OperatorDiagnosticsResponse | null
+  runtimeProbe: LocalRuntimeProbeResponse | null
+  runtimeAttempts: LocalRuntimeAttempt[]
+  localApiUrl: string
+  localError: string
+  updateAvailable: boolean
+  runtimeActionBusy: 'restart' | 'repair' | null
+  onCopy: (value: string, message: string) => void
+  onOpenExternal: (url: string) => void
+  onSetLocalApiUrl: (value: string) => void
+  onRuntimeAction: (action: 'restart' | 'repair') => void
+  onRefreshRuntime: () => void
+}) {
+  const findings = useMemo(
+    () => buildDoctorFindings({ status, diagnostics, runtimeProbe, runtimeAttempts, localError, updateAvailable }),
+    [status, diagnostics, runtimeProbe, runtimeAttempts, localError, updateAvailable],
+  )
+
+  const summary = useMemo(() => {
+    const critical = findings.filter((item) => item.severity === 'high').length
+    const actionNeeded = findings.filter((item) => item.severity === 'medium').length
+    return {
+      critical,
+      actionNeeded,
+      readyChecks: diagnostics?.runtime_checks.filter((check) => check.ready).length ?? 0,
+      totalChecks: diagnostics?.runtime_checks.length ?? 0,
+    }
+  }, [diagnostics?.runtime_checks, findings])
+
+  return (
+    <section className="panel panel-span-2">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Runtime doctor</p>
+          <h2>Priority issues and recovery path</h2>
+        </div>
+      </div>
+      <div className="doctor-summary-grid">
+        <MiniStat label="Critical issues" value={String(summary.critical)} />
+        <MiniStat label="Needs action" value={String(summary.actionNeeded)} />
+        <MiniStat
+          label="Ready checks"
+          value={summary.totalChecks ? `${summary.readyChecks}/${summary.totalChecks}` : status ? 'Live' : 'No data'}
+        />
+        <MiniStat
+          label="Current target"
+          value={runtimeProbe?.configured_api_url || runtimeProbe?.suggested_api_url || localApiUrl}
+        />
+      </div>
+      {findings.length ? (
+        <div className="doctor-grid top-gap">
+          {findings.map((finding) => (
+            <article key={finding.key} className={`doctor-card doctor-card--${finding.severity}`}>
+              <div className="doctor-card__header">
+                <StatusPill tone={doctorTone(finding.severity)}>{doctorLabel(finding.severity)}</StatusPill>
+                <strong>{finding.title}</strong>
+              </div>
+              <p className="doctor-card__summary">{finding.summary}</p>
+              {finding.detail ? <p className="support-copy">{finding.detail}</p> : null}
+              <div className="doctor-actions">
+                {finding.actions.map((action) => (
+                  <DoctorActionButton
+                    key={`${finding.key}:${action}`}
+                    action={action}
+                    runtimeProbe={runtimeProbe}
+                    hubUrl={hubUrl}
+                    localApiUrl={localApiUrl}
+                    runtimeActionBusy={runtimeActionBusy}
+                    onCopy={onCopy}
+                    onOpenExternal={onOpenExternal}
+                    onSetLocalApiUrl={onSetLocalApiUrl}
+                    onRuntimeAction={onRuntimeAction}
+                    onRefreshRuntime={onRefreshRuntime}
+                  />
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <Notice tone="good">
+          <strong>Runtime posture is clean.</strong>
+          <p>Local API, service posture, and runtime checks do not currently show a recovery action.</p>
+        </Notice>
+      )}
+      {runtimeProbe?.notes.length ? (
+        <div className="top-gap">
+          <p className="eyebrow">Probe notes</p>
+          <ul className="bullet-list">
+            {runtimeProbe.notes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {runtimeAttempts.length ? (
+        <div className="top-gap">
+          <p className="eyebrow">Attempted endpoints</p>
+          <div className="stack">
+            {runtimeAttempts.map((attempt) => (
+              <MiniStat
+                key={`${attempt.api_url}:${attempt.ok ? 'ok' : 'err'}`}
+                label={attempt.ok ? 'Connected' : 'Attempt'}
+                value={attempt.ok ? attempt.api_url : `${attempt.api_url} — ${attempt.error || 'Failed'}`}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function DoctorActionButton({
+  action,
+  runtimeProbe,
+  hubUrl,
+  localApiUrl,
+  runtimeActionBusy,
+  onCopy,
+  onOpenExternal,
+  onSetLocalApiUrl,
+  onRuntimeAction,
+  onRefreshRuntime,
+}: {
+  action: DoctorActionKey
+  runtimeProbe: LocalRuntimeProbeResponse | null
+  hubUrl: string
+  localApiUrl: string
+  runtimeActionBusy: 'restart' | 'repair' | null
+  onCopy: (value: string, message: string) => void
+  onOpenExternal: (url: string) => void
+  onSetLocalApiUrl: (value: string) => void
+  onRuntimeAction: (action: 'restart' | 'repair') => void
+  onRefreshRuntime: () => void
+}) {
+  switch (action) {
+    case 'use-detected-endpoint':
+      return (
+        <button
+          className="primary-button"
+          onClick={() => onSetLocalApiUrl(runtimeProbe?.configured_api_url || runtimeProbe?.suggested_api_url || localApiUrl)}
+          disabled={!runtimeProbe}
+        >
+          Use detected endpoint
+        </button>
+      )
+    case 'restart-service':
+      return (
+        <button className="primary-button" onClick={() => onRuntimeAction('restart')} disabled={runtimeActionBusy !== null}>
+          {runtimeActionBusy === 'restart' ? 'Restarting…' : 'Restart service'}
+        </button>
+      )
+    case 'repair-runtime':
+      return (
+        <button className="ghost-button" onClick={() => onRuntimeAction('repair')} disabled={runtimeActionBusy !== null}>
+          {runtimeActionBusy === 'repair' ? 'Opening installer…' : 'Run repair installer'}
+        </button>
+      )
+    case 'refresh-runtime':
+      return (
+        <button className="ghost-button" onClick={onRefreshRuntime}>
+          Refresh runtime
+        </button>
+      )
+    case 'copy-install-command':
+      return runtimeProbe ? (
+        <button className="ghost-button" onClick={() => onCopy(runtimeProbe.install_command, 'Copied install command.')}>
+          Copy install command
+        </button>
+      ) : null
+    case 'copy-start-command':
+      return runtimeProbe?.start_command ? (
+        <button className="ghost-button" onClick={() => onCopy(runtimeProbe.start_command!, 'Copied start command.')}>
+          Copy start command
+        </button>
+      ) : null
+    case 'copy-log-command':
+      return runtimeProbe?.log_command ? (
+        <button className="ghost-button" onClick={() => onCopy(runtimeProbe.log_command!, 'Copied log command.')}>
+          Copy log command
+        </button>
+      ) : null
+    case 'open-operator-guide':
+      return (
+        <button className="ghost-button" onClick={() => void onOpenExternal('https://ryvion.ai/operators')}>
+          Open operator guide
+        </button>
+      )
+    case 'open-local-health':
+      return (
+        <button className="ghost-button" onClick={() => void onOpenExternal(`${localApiUrl}/healthz`)}>
+          Open local health
+        </button>
+      )
+    case 'open-hub-health':
+      return (
+        <button className="ghost-button" onClick={() => void onOpenExternal(`${hubUrl}/healthz`)}>
+          Open hub health
+        </button>
+      )
+    default:
+      return null
+  }
 }
 
 function normalizeMetrics(metrics: OperatorStatusResponse['metrics']) {
@@ -1615,6 +1825,201 @@ function ThemeToggle({ value, onChange }: { value: ThemeMode; onChange: (theme: 
       </select>
     </label>
   )
+}
+
+function buildDoctorFindings({
+  status,
+  diagnostics,
+  runtimeProbe,
+  runtimeAttempts,
+  localError,
+  updateAvailable,
+}: {
+  status: OperatorStatusResponse | null
+  diagnostics: OperatorDiagnosticsResponse | null
+  runtimeProbe: LocalRuntimeProbeResponse | null
+  runtimeAttempts: LocalRuntimeAttempt[]
+  localError: string
+  updateAvailable: boolean
+}): DoctorFinding[] {
+  const findings: DoctorFinding[] = []
+
+  if (!status && localError) {
+    findings.push({
+      key: 'local-api-unreachable',
+      title: 'Local API unreachable',
+      severity: 'high',
+      summary: localError,
+      detail: runtimeAttempts.length
+        ? `The app tried ${runtimeAttempts.length} local endpoint${runtimeAttempts.length === 1 ? '' : 's'} and could not attach.`
+        : 'The desktop app could not load the node runtime snapshot.',
+      actions: runtimeProbe?.api_url_mismatch
+        ? ['use-detected-endpoint', 'restart-service', 'repair-runtime', 'refresh-runtime']
+        : ['restart-service', 'repair-runtime', 'refresh-runtime', 'open-operator-guide'],
+    })
+  }
+
+  if (runtimeProbe && !runtimeProbe.service_installed) {
+    findings.push({
+      key: 'service-missing',
+      title: 'Node runtime is not installed',
+      severity: 'high',
+      summary: 'The local machine does not appear to have the Ryvion node service installed for this user.',
+      detail: `Platform: ${runtimeProbe.platform}. Install the signed runtime and then refresh the workspace.`,
+      actions: ['repair-runtime', 'copy-install-command', 'open-operator-guide'],
+    })
+  } else if (runtimeProbe && !runtimeProbe.binary_supports_local_api) {
+    findings.push({
+      key: 'binary-legacy',
+      title: 'Installed runtime is too old for operator controls',
+      severity: 'high',
+      summary: 'The installed ryvion-node binary does not support the local operator API.',
+      detail: 'Reinstall or update the node runtime so the desktop app can attach to the service locally.',
+      actions: ['repair-runtime', 'copy-install-command', 'open-operator-guide'],
+    })
+  } else if (runtimeProbe && !runtimeProbe.service_running && runtimeProbe.service_installed) {
+    findings.push({
+      key: 'service-stopped',
+      title: 'Node service is installed but not running',
+      severity: 'high',
+      summary: 'The node service exists on this machine, but it is not active in the current session.',
+      detail: runtimeProbe.start_command ? 'You can start it directly or let the app attempt a service restart.' : 'Restart the service and then re-check the local API.',
+      actions: ['restart-service', 'copy-start-command', 'repair-runtime', 'refresh-runtime'],
+    })
+  } else if (runtimeProbe && runtimeProbe.service_running && !runtimeProbe.api_port_open) {
+    findings.push({
+      key: 'api-port-closed',
+      title: 'Service is running but the local API is not listening',
+      severity: 'high',
+      summary: 'The node service appears active, but the operator API port is still closed.',
+      detail: runtimeProbe.service_configured_for_api
+        ? 'This usually means the service is still starting or has stalled before binding the local API.'
+        : 'The service definition looks older than the local API feature and likely needs repair.',
+      actions: runtimeProbe.service_configured_for_api
+        ? ['restart-service', 'copy-log-command', 'refresh-runtime']
+        : ['repair-runtime', 'copy-log-command', 'refresh-runtime'],
+    })
+  }
+
+  if (runtimeProbe?.api_url_mismatch) {
+    findings.push({
+      key: 'api-mismatch',
+      title: 'Saved API endpoint is not the detected runtime endpoint',
+      severity: 'medium',
+      summary: `The app is targeting ${runtimeProbe.api_url}, but the runtime appears to be configured for ${runtimeProbe.configured_api_url || runtimeProbe.suggested_api_url}.`,
+      actions: ['use-detected-endpoint', 'refresh-runtime'],
+    })
+  }
+
+  if (updateAvailable && status?.latest_version) {
+    findings.push({
+      key: 'runtime-update',
+      title: 'Runtime update available',
+      severity: 'low',
+      summary: `Installed ${status.version}. Latest published runtime is ${status.latest_version}.`,
+      detail: 'Update during the next maintenance window so the node keeps new workload and operator features.',
+      actions: ['open-operator-guide'],
+    })
+  }
+
+  if (status && !status.runtime.docker_ready) {
+    findings.push({
+      key: 'docker-unavailable',
+      title: 'Docker is not reachable',
+      severity: 'medium',
+      summary: 'Container-backed workloads cannot land until the Docker daemon is running and reachable.',
+      detail: 'Media, embedding, and most OCI workloads depend on Docker health on the local machine.',
+      actions: ['copy-log-command', 'refresh-runtime'],
+    })
+  }
+
+  if (status && !status.declared_country) {
+    findings.push({
+      key: 'declared-country-missing',
+      title: 'Declared country is missing',
+      severity: 'low',
+      summary: 'Country-restricted and sovereign routing paths need a declared country on the node runtime.',
+      detail: 'Open Settings and set the declared country before pursuing higher-trust workload pools.',
+      actions: [],
+    })
+  }
+
+  for (const issue of diagnostics?.issues ?? []) {
+    findings.push({
+      key: `hub-${issue.key}`,
+      title: `${formatIssueLabel(issue.key)} issue`,
+      severity: issue.key === 'register' || issue.key === 'heartbeat' ? 'high' : 'medium',
+      summary: issue.message,
+      detail: issue.updated_at ? `Last reported ${formatRelative(issue.updated_at)}.` : undefined,
+      actions: issue.key === 'register' || issue.key === 'heartbeat'
+        ? ['copy-log-command', 'open-hub-health', 'refresh-runtime']
+        : ['copy-log-command', 'refresh-runtime'],
+    })
+  }
+
+  return dedupeDoctorFindings(findings)
+}
+
+function dedupeDoctorFindings(findings: DoctorFinding[]) {
+  const seen = new Set<string>()
+  return findings
+    .filter((finding) => {
+      if (seen.has(finding.key)) return false
+      seen.add(finding.key)
+      return true
+    })
+    .sort((left, right) => severityOrder(left.severity) - severityOrder(right.severity))
+}
+
+function severityOrder(value: DoctorSeverity) {
+  switch (value) {
+    case 'high':
+      return 0
+    case 'medium':
+      return 1
+    case 'low':
+    default:
+      return 2
+  }
+}
+
+function doctorTone(value: DoctorSeverity): NoticeTone {
+  switch (value) {
+    case 'high':
+      return 'warn'
+    case 'medium':
+      return 'neutral'
+    case 'low':
+    default:
+      return 'good'
+  }
+}
+
+function doctorLabel(value: DoctorSeverity) {
+  switch (value) {
+    case 'high':
+      return 'Critical'
+    case 'medium':
+      return 'Action'
+    case 'low':
+    default:
+      return 'Advisory'
+  }
+}
+
+function formatIssueLabel(value: string) {
+  switch (value) {
+    case 'register':
+      return 'Registration'
+    case 'heartbeat':
+      return 'Heartbeat'
+    case 'claim':
+      return 'Claim'
+    case 'payout':
+      return 'Payout'
+    default:
+      return value
+  }
 }
 
 function stringsPresent(value?: string | null) {

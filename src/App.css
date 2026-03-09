@@ -559,6 +559,63 @@ label span {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.doctor-summary-grid,
+.doctor-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.doctor-summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.doctor-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.doctor-card {
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+
+.doctor-card--high {
+  border-color: rgba(173, 90, 20, 0.3);
+}
+
+.doctor-card--medium {
+  border-color: rgba(44, 92, 197, 0.22);
+}
+
+.doctor-card--low {
+  border-color: rgba(27, 127, 71, 0.22);
+}
+
+.doctor-card__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.doctor-card__header strong {
+  font-size: 1.05rem;
+}
+
+.doctor-card__summary {
+  margin: 0 0 10px;
+  font-weight: 600;
+  line-height: 1.65;
+}
+
+.doctor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
 .workload-card-grid {
   display: grid;
   gap: 16px;
@@ -722,6 +779,7 @@ label span {
   .job-meta-grid,
   .form-grid,
   .capacity-grid,
+  .doctor-summary-grid,
   .workload-card-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -755,6 +813,8 @@ label span {
   .metric-grid--four,
   .form-grid,
   .capacity-grid,
+  .doctor-summary-grid,
+  .doctor-grid,
   .workload-card-grid {
     grid-template-columns: 1fr;
   }
