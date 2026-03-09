@@ -599,6 +599,12 @@ label span {
   gap: 8px;
 }
 
+.token-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .mini-stat {
   padding: 14px;
   border-radius: 16px;

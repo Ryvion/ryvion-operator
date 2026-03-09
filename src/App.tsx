@@ -8,6 +8,7 @@ import {
   DEFAULT_LOCAL_API_URL,
   generateClaimCode,
   getConnectOnboardingLink,
+  getOperatorDiagnostics,
   getConnectStatus,
   getOperatorJobs,
   getOperatorLogs,
@@ -20,6 +21,7 @@ import {
   getStoredLocalAPIUrl,
   login,
   type LocalRuntimeProbeResponse,
+  type OperatorDiagnosticsResponse,
   savePayoutPreference,
   signup,
   type OperatorJob,
@@ -82,6 +84,7 @@ function App() {
   const [status, setStatus] = useState<OperatorStatusResponse | null>(null)
   const [jobs, setJobs] = useState<OperatorJob[]>([])
   const [logs, setLogs] = useState<string[]>([])
+  const [diagnostics, setDiagnostics] = useState<OperatorDiagnosticsResponse | null>(null)
   const [localError, setLocalError] = useState('')
   const [runtimeProbe, setRuntimeProbe] = useState<LocalRuntimeProbeResponse | null>(null)
   const [runtimeActionBusy, setRuntimeActionBusy] = useState<'restart' | 'repair' | null>(null)
@@ -149,12 +152,15 @@ function App() {
       nextStatus: OperatorStatusResponse,
       nextJobs: OperatorJob[],
       nextLogs: string[],
+      nextDiagnostics: OperatorDiagnosticsResponse | null,
       sourceUrl: string,
       options?: { autodetected?: boolean },
     ) => {
+      nextStatus.metrics = normalizeMetrics(nextStatus.metrics)
       setStatus(nextStatus)
       setJobs(nextJobs)
       setLogs(nextLogs)
+      setDiagnostics(nextDiagnostics)
       setLocalError('')
       setRuntimeProbe(null)
       setLastRefreshAt(new Date())
@@ -175,22 +181,24 @@ function App() {
   )
 
   const fetchLocalSnapshot = useCallback(async (baseUrl: string) => {
-    const [nextStatus, nextJobs, nextLogs] = await Promise.all([
+    const [nextStatus, nextJobs, nextLogs, nextDiagnostics] = await Promise.all([
       getOperatorStatus(baseUrl),
       getOperatorJobs(baseUrl),
       getOperatorLogs(200, baseUrl),
+      getOperatorDiagnostics(baseUrl).catch(() => null),
     ])
     return {
       nextStatus,
       nextJobs: nextJobs.jobs,
       nextLogs: nextLogs.lines,
+      nextDiagnostics,
     }
   }, [])
 
   const refreshLocal = useCallback(async () => {
     try {
       const snapshot = await fetchLocalSnapshot(localApiUrl)
-      applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, localApiUrl)
+      applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, snapshot.nextDiagnostics, localApiUrl)
     } catch (error) {
       try {
         const probe = await probeLocalRuntime(localApiUrl)
@@ -208,7 +216,7 @@ function App() {
           if (!isLikelyRuntime) continue
           try {
             const snapshot = await fetchLocalSnapshot(candidate)
-            applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, candidate, { autodetected: true })
+            applyLocalSnapshot(snapshot.nextStatus, snapshot.nextJobs, snapshot.nextLogs, snapshot.nextDiagnostics, candidate, { autodetected: true })
             return
           } catch {
             // Try the next candidate.
@@ -753,6 +761,7 @@ function App() {
               <DiagnosticsView
                 status={status}
                 logs={logs}
+                diagnostics={diagnostics}
                 localApiUrl={localApiUrl}
                 onCopy={handleCopy}
                 onOpenExternal={openExternal}
@@ -1328,6 +1337,7 @@ function EarningsView(props: {
 function DiagnosticsView({
   status,
   logs,
+  diagnostics,
   localApiUrl,
   onCopy,
   onOpenExternal,
@@ -1335,6 +1345,7 @@ function DiagnosticsView({
 }: {
   status: OperatorStatusResponse
   logs: string[]
+  diagnostics: OperatorDiagnosticsResponse | null
   localApiUrl: string
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
@@ -1357,6 +1368,7 @@ function DiagnosticsView({
         </dl>
         <div className="inline-actions">
           <button className="ghost-button" onClick={() => onCopy(status.public_key_hex, 'Copied node public key.')}>Copy public key</button>
+          {diagnostics ? <button className="ghost-button" onClick={() => onCopy(JSON.stringify(diagnostics, null, 2), 'Copied diagnostics snapshot.')}>Copy diagnostics JSON</button> : null}
           <button className="ghost-button" onClick={() => onCopy(logs.join('\n'), 'Copied log tail.')}>Copy logs</button>
           <button className="ghost-button" onClick={() => void onOpenExternal(`${localApiUrl}/healthz`)}>Open local health</button>
           <button className="ghost-button" onClick={() => void onOpenExternal(`${status.hub_url}/healthz`)}>Open hub health</button>
@@ -1371,14 +1383,63 @@ function DiagnosticsView({
             <h2>Latest operator issues</h2>
           </div>
         </div>
-        <div className="stack">
-          <MiniStat label="Register" value={status.register_error || 'Clear'} />
-          <MiniStat label="Heartbeat" value={status.last_heartbeat_error || 'Clear'} />
-          <MiniStat label="Claim" value={status.last_claim_error || 'Clear'} />
-          <MiniStat label="Payout" value={status.last_payout_error || 'Clear'} />
-          <MiniStat label="Runtime version" value={`${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}`} />
-        </div>
+        {diagnostics?.issues.length ? (
+          <div className="stack">
+            {diagnostics.issues.map((issue) => (
+              <MiniStat
+                key={issue.key}
+                label={issue.key}
+                value={`${issue.message}${issue.updated_at ? ` · ${formatRelative(issue.updated_at)}` : ''}`}
+              />
+            ))}
+            <MiniStat label="Runtime version" value={`${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}`} />
+          </div>
+        ) : (
+          <div className="stack">
+            <MiniStat label="Register" value="Clear" />
+            <MiniStat label="Heartbeat" value="Clear" />
+            <MiniStat label="Claim" value="Clear" />
+            <MiniStat label="Payout" value="Clear" />
+            <MiniStat label="Runtime version" value={`${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}`} />
+          </div>
+        )}
       </section>
+
+      {diagnostics ? (
+        <section className="panel panel-span-2">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Structured checks</p>
+              <h2>Runtime readiness breakdown</h2>
+            </div>
+          </div>
+          <div className="runtime-checks">
+            {diagnostics.runtime_checks.map((check) => (
+              <CheckRow key={check.key} label={check.label} state={check.ready} detail={check.detail} />
+            ))}
+          </div>
+          {diagnostics.recommendations.length ? (
+            <div className="top-gap">
+              <p className="eyebrow">Recommended actions</p>
+              <ul className="bullet-list">
+                {diagnostics.recommendations.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {diagnostics.status_tokens.length ? (
+            <div className="top-gap">
+              <p className="eyebrow">Health report tokens</p>
+              <div className="token-wrap">
+                {diagnostics.status_tokens.map((token) => (
+                  <span key={token} className="status-pill status-pill--neutral">{token}</span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="panel panel-span-2">
         <div className="panel-header">
@@ -1391,6 +1452,17 @@ function DiagnosticsView({
       </section>
     </div>
   )
+}
+
+function normalizeMetrics(metrics: OperatorStatusResponse['metrics']) {
+  return {
+    timestamp_ms: metrics.timestamp_ms,
+    cpu_util: metrics.cpu_util ?? metrics.CPUUtil,
+    mem_util: metrics.mem_util ?? metrics.MemUtil,
+    gpu_util: metrics.gpu_util ?? metrics.GPUUtil,
+    power_watts: metrics.power_watts ?? metrics.PowerWatts,
+    gpu_throttled: metrics.gpu_throttled ?? metrics.GPUThrottled,
+  }
 }
 
 function SettingsView({

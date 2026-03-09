@@ -244,15 +244,21 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
         "/opt/ryvion/ryvion-node".to_string(),
         "/usr/local/bin/ryvion-node".to_string(),
     ];
-    if let Some(path) = extract_systemd_exec_start(&unit_text) {
+    if let Some(path) = extract_systemd_exec_start_path(&unit_text) {
         binary_candidates.insert(0, path);
     }
     let binary_paths = existing_paths(binary_candidates);
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
-    let configured_port = extract_systemd_ui_port(&unit_text)
-        .or_else(|| exec_start.as_deref().and_then(|value| split_command_tokens(value)).as_ref().and_then(|tokens| find_flag_value_in_tokens(tokens, "-ui-port")).and_then(|value| value.parse::<u16>().ok()));
+    let configured_port = extract_systemd_ui_port(&unit_text).or_else(|| {
+        exec_start
+            .as_deref()
+            .map(split_command_tokens)
+            .as_ref()
+            .and_then(|tokens| find_flag_value_in_tokens(tokens, "-ui-port"))
+            .and_then(|value| value.parse::<u16>().ok())
+    });
     let configured_api_url = configured_port.map(loopback_api_url);
     let configured_api_port_open = configured_port
         .map(|configured| tcp_open("127.0.0.1", configured))
@@ -600,6 +606,13 @@ fn extract_systemd_exec_start_command(contents: &str) -> Option<String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn extract_systemd_exec_start_path(contents: &str) -> Option<String> {
+    extract_systemd_exec_start_command(contents)
+        .map(|value| split_command_tokens(&value))
+        .and_then(|tokens| tokens.first().cloned())
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn extract_systemd_ui_port(contents: &str) -> Option<u16> {
     for line in contents.lines() {
         let line = line.trim();
@@ -709,6 +722,18 @@ mod tests {
         Environment=RYV_UI_PORT=45910
         "#;
         assert_eq!(extract_systemd_ui_port(unit), Some(45910));
+    }
+
+    #[test]
+    fn parses_systemd_exec_start_path() {
+        let unit = r#"
+        [Service]
+        ExecStart="/opt/ryvion/ryvion-node" -hub https://ryvion-hub.fly.dev -ui-port 45910
+        "#;
+        assert_eq!(
+            extract_systemd_exec_start_path(unit),
+            Some("/opt/ryvion/ryvion-node".to_string())
+        );
     }
 
     #[test]

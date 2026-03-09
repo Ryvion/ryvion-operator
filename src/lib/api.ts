@@ -52,10 +52,17 @@ export interface OperatorStatusResponse {
     disk_gb?: number
   }
   metrics: {
+    timestamp_ms?: number
     cpu_util?: number
     mem_util?: number
     gpu_util?: number
     power_watts?: number
+    gpu_throttled?: boolean
+    CPUUtil?: number
+    MemUtil?: number
+    GPUUtil?: number
+    PowerWatts?: number
+    GPUThrottled?: boolean
   }
   current_job?: OperatorJob
   recent_jobs: OperatorJob[]
@@ -63,6 +70,31 @@ export interface OperatorStatusResponse {
   last_claim_error?: string
   last_payout_at?: string
   last_payout_error?: string
+}
+
+export interface OperatorDiagnosticsResponse {
+  version: string
+  latest_version?: string
+  local_api_url: string
+  declared_country?: string
+  runtime_checks: Array<{
+    key: string
+    label: string
+    ready: boolean
+    detail?: string
+    severity?: string
+  }>
+  recommendations: string[]
+  issues: Array<{
+    key: string
+    message: string
+    updated_at?: string
+  }>
+  status_tokens: string[]
+  log_tail: string[]
+  last_heartbeat_at?: string
+  last_claim_at?: string
+  last_payout_at?: string
 }
 
 export interface OperatorJobsResponse {
@@ -221,6 +253,10 @@ export function getOperatorJobs(baseUrl = getStoredLocalAPIUrl()) {
 
 export function getOperatorLogs(limit = 200, baseUrl = getStoredLocalAPIUrl()) {
   return request<OperatorLogsResponse>(baseUrl, `/api/v1/operator/logs?limit=${limit}`)
+}
+
+export function getOperatorDiagnostics(baseUrl = getStoredLocalAPIUrl()) {
+  return request<OperatorDiagnosticsResponse>(baseUrl, '/api/v1/operator/diagnostics')
 }
 
 export function claimNode(code: string, baseUrl = getStoredLocalAPIUrl()) {
