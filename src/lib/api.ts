@@ -126,6 +126,9 @@ export interface LocalRuntimeProbeResponse {
   service_configured_for_api: boolean
   binary_supports_local_api: boolean
   binary_paths: string[]
+  active_binary_path?: string
+  managed_binary_path?: string
+  service_uses_managed_binary: boolean
   log_path?: string
   install_command: string
   start_command?: string
@@ -203,6 +206,12 @@ export interface ClaimCodeResponse {
   expires_in: number
 }
 
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: unknown
+  }
+}
+
 function normalizeBase(base: string) {
   return base.trim().replace(/\/+$/, '')
 }
@@ -228,18 +237,77 @@ function authHeaders(token?: string) {
   return { 'X-API-Key': credential } as Record<string, string>
 }
 
+function runningInTauri() {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
+function normalizeHeaders(headers?: HeadersInit) {
+  if (!headers) return {} as Record<string, string>
+  if (headers instanceof Headers) {
+    return Object.fromEntries(headers.entries())
+  }
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers)
+  }
+  return { ...headers }
+}
+
+function normalizeBody(body?: BodyInit | null) {
+  if (body == null) return undefined
+  return typeof body === 'string' ? body : String(body)
+}
+
+function formatRequestError(target: string, error: unknown) {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return `Timed out while reaching ${target}`
+  }
+  const message = typeof error === 'string'
+    ? error
+    : error instanceof Error
+      ? error.message
+      : String(error ?? '')
+  if (!message) return `Unable to reach ${target}`
+  if (message.startsWith(`${target}:`) || message.startsWith('Timed out while reaching')) {
+    return message
+  }
+  if (/^\d{3}\s/.test(message)) {
+    return `${target}: ${message}`
+  }
+  return `Unable to reach ${target}: ${message}`
+}
+
 async function request<T>(baseUrl: string, path: string, init?: RequestInit & { timeoutMs?: number }) {
+  const target = `${normalizeBase(baseUrl)}${path}`
+  const requestHeaders = normalizeHeaders(init?.headers)
+  const requestBody = normalizeBody(init?.body)
+
+  if (runningInTauri()) {
+    try {
+      const response = await invoke<T | null>('desktop_request', {
+        baseUrl,
+        path,
+        method: init?.method ?? 'GET',
+        headers: requestHeaders,
+        body: requestBody,
+        timeoutMs: init?.timeoutMs ?? 20000,
+      })
+      return (response ?? undefined) as T
+    } catch (error) {
+      throw new Error(formatRequestError(target, error))
+    }
+  }
+
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), init?.timeoutMs ?? 20000)
-  const target = `${normalizeBase(baseUrl)}${path}`
   try {
     const response = await fetch(target, {
       ...init,
       headers: {
         Accept: 'application/json',
-        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-        ...(init?.headers ?? {}),
+        ...(requestBody ? { 'Content-Type': 'application/json' } : {}),
+        ...requestHeaders,
       },
+      body: requestBody,
       cache: 'no-store',
       signal: controller.signal,
     })
@@ -250,14 +318,9 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit & { 
     if (response.status === 204) return undefined as T
     return (await response.json()) as T
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Timed out while reaching ${target}`)
-    }
-    if (error instanceof Error && error.message) {
-      throw new Error(`Unable to reach ${target}: ${error.message}`)
-    }
-    throw new Error(`Unable to reach ${target}`)
-  } finally {
+    throw new Error(formatRequestError(target, error))
+  }
+  finally {
     window.clearTimeout(timeout)
   }
 }

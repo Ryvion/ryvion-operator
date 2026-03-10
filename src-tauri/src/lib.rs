@@ -1,6 +1,8 @@
 use reqwest::blocking::Client;
+use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -25,6 +27,9 @@ struct LocalRuntimeProbe {
     service_configured_for_api: bool,
     binary_supports_local_api: bool,
     binary_paths: Vec<String>,
+    active_binary_path: Option<String>,
+    managed_binary_path: Option<String>,
+    service_uses_managed_binary: bool,
     log_path: Option<String>,
     install_command: String,
     start_command: Option<String>,
@@ -60,6 +65,56 @@ struct LocalRuntimeSnapshot {
 }
 
 #[tauri::command]
+fn desktop_request(
+    base_url: String,
+    path: String,
+    method: String,
+    headers: Option<HashMap<String, String>>,
+    body: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_millis(timeout_ms.unwrap_or(20_000)))
+        .build()
+        .map_err(|err| format!("failed to initialize HTTP client: {err}"))?;
+    let url = format!("{}{}", normalize_http_base(&base_url), path);
+    let method = Method::from_bytes(method.trim().as_bytes())
+        .map_err(|err| format!("unsupported HTTP method '{}': {err}", method))?;
+
+    let mut request = client
+        .request(method, &url)
+        .header("Accept", "application/json");
+    if let Some(headers) = headers {
+        for (key, value) in headers {
+            if !key.trim().is_empty() {
+                request = request.header(key, value);
+            }
+        }
+    }
+    if let Some(body) = body {
+        request = request
+            .header("Content-Type", "application/json")
+            .body(body);
+    }
+
+    let response = request
+        .send()
+        .map_err(|err| format!("{}: {}", url, err))?;
+    let status = response.status();
+    if status.as_u16() == 204 {
+        return Ok(Value::Null);
+    }
+    let text = response
+        .text()
+        .map_err(|err| format!("{}: failed to read response ({})", url, err))?;
+    if !status.is_success() {
+        return Err(format!("{} {}: {}", status.as_u16(), status, text.trim()));
+    }
+    serde_json::from_str::<Value>(&text)
+        .map_err(|err| format!("{}: invalid JSON response ({})", url, err))
+}
+
+#[tauri::command]
 fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
     let (host, port) = parse_host_port(&api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
     let api_port_open = tcp_open(&host, port);
@@ -92,6 +147,9 @@ fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
         service_configured_for_api: false,
         binary_supports_local_api: false,
         binary_paths: Vec::new(),
+        active_binary_path: None,
+        managed_binary_path: None,
+        service_uses_managed_binary: false,
         log_path: None,
         install_command: "Use the operator guide to install the node runtime.".to_string(),
         start_command: None,
@@ -196,11 +254,13 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     let log_path = PathBuf::from(&home).join(".ryvion/node.log");
     let plist_contents = std::fs::read_to_string(&plist).unwrap_or_default();
     let plist_args = extract_plist_program_arguments(&plist_contents);
+    let active_binary_path = extract_plist_program_path(&plist_contents);
+    let managed_binary_path = Some("/usr/local/bin/ryvion-node".to_string());
     let mut binary_candidates = vec![
         "/usr/local/bin/ryvion-node".to_string(),
         "/opt/homebrew/bin/ryvion-node".to_string(),
     ];
-    if let Some(path) = extract_plist_program_path(&plist_contents) {
+    if let Some(path) = active_binary_path.clone() {
         binary_candidates.insert(0, path);
     }
     let installed = plist.exists() || binary_candidates.iter().any(|path| PathBuf::from(path).exists());
@@ -218,6 +278,10 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
         .map(|configured| tcp_open("127.0.0.1", configured))
         .unwrap_or(api_port_open);
     let service_configured_for_api = configured_port.is_some();
+    let service_uses_managed_binary = active_binary_path
+        .as_ref()
+        .map(|path| is_managed_macos_binary(path))
+        .unwrap_or(false);
     let api_url_mismatch = configured_api_url
         .as_ref()
         .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
@@ -236,6 +300,12 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     }
     if installed && !binary_supports_local_api {
         notes.push("The installed ryvion-node binary predates local operator API support. Reinstall or update the node runtime.".to_string());
+    }
+    if service_running && active_binary_path.is_some() && !service_uses_managed_binary {
+        notes.push(format!(
+            "The launch agent is starting {} instead of the managed runtime at /usr/local/bin/ryvion-node. This typically happens after running a local source build, and it prevents signed release auto-updates from taking over.",
+            active_binary_path.as_deref().unwrap_or_default()
+        ));
     }
     if service_running && !api_port_open {
         notes.push("The launch agent appears loaded, but the local operator API port is not listening yet.".to_string());
@@ -262,6 +332,9 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
         service_configured_for_api,
         binary_supports_local_api,
         binary_paths,
+        active_binary_path,
+        managed_binary_path,
+        service_uses_managed_binary,
         log_path: Some(log_path.display().to_string()),
         install_command: "curl -sSL https://ryvion-hub.fly.dev/install.sh?platform=macos | bash".to_string(),
         start_command: Some(format!("launchctl kickstart -k gui/{}/com.ryvion.node", uid.trim())),
@@ -404,6 +477,12 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
         service_configured_for_api,
         binary_supports_local_api,
         binary_paths,
+        active_binary_path: extract_systemd_exec_start_path(&unit_text),
+        managed_binary_path: Some("/opt/ryvion/ryvion-node".to_string()),
+        service_uses_managed_binary: exec_start
+            .as_deref()
+            .map(|path| path.trim() == "/opt/ryvion/ryvion-node" || path.trim() == "/usr/local/bin/ryvion-node")
+            .unwrap_or(false),
         log_path: Some(log_path.display().to_string()),
         install_command: "curl -sSL https://ryvion-hub.fly.dev/install.sh | bash".to_string(),
         start_command: Some("sudo systemctl restart ryvion-node".to_string()),
@@ -439,6 +518,7 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
     let service_installed = service_query.contains("SERVICE_NAME: RyvionNode");
     let service_running = service_query.contains("RUNNING");
     let binary_paths = existing_paths(binary_candidates);
+    let managed_binary_path = binary_paths.first().cloned();
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
@@ -494,6 +574,9 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
         service_configured_for_api,
         binary_supports_local_api,
         binary_paths,
+        active_binary_path: managed_binary_path.clone(),
+        managed_binary_path,
+        service_uses_managed_binary: true,
         log_path,
         install_command: "iex ((New-Object System.Net.WebClient).DownloadString('https://ryvion-hub.fly.dev/install.ps1'))".to_string(),
         start_command: Some("Start-Service RyvionNode".to_string()),
@@ -661,6 +744,14 @@ fn existing_paths(paths: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|path| PathBuf::from(path).exists())
         .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_managed_macos_binary(path: &str) -> bool {
+    matches!(
+        path.trim(),
+        "/usr/local/bin/ryvion-node" | "/opt/homebrew/bin/ryvion-node"
+    )
 }
 
 fn binary_help_contains(path: &str, needle: &str) -> bool {
@@ -836,7 +927,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             probe_local_runtime,
             load_local_runtime_snapshot,
-            run_local_runtime_action
+            run_local_runtime_action,
+            desktop_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -944,6 +1036,9 @@ SERVICE_NAME: RyvionNode
             service_configured_for_api: true,
             binary_supports_local_api: true,
             binary_paths: vec!["/usr/local/bin/ryvion-node".to_string()],
+            active_binary_path: Some("/usr/local/bin/ryvion-node".to_string()),
+            managed_binary_path: Some("/usr/local/bin/ryvion-node".to_string()),
+            service_uses_managed_binary: true,
             log_path: None,
             install_command: "install".to_string(),
             start_command: None,

@@ -77,6 +77,13 @@ type DoctorFinding = {
   detail?: string
   actions: DoctorActionKey[]
 }
+type RuntimeVersionInfo = {
+  installed: string
+  latest: string
+  display: string
+  updateAvailable: boolean
+  manualBuild: boolean
+}
 
 type CloudFormState = {
   name: string
@@ -285,19 +292,25 @@ function App() {
     return 'healthy'
   }, [status])
 
-  const updateAvailable = useMemo(
-    () => Boolean(status?.latest_version && status.latest_version !== status.version),
-    [status],
-  )
+  const runtimeVersionInfo = useMemo(() => describeRuntimeVersion(status), [status])
+  const updateAvailable = runtimeVersionInfo.updateAvailable
 
   const runtimeAlerts = useMemo<Array<{ tone: NoticeTone; title: string; message: string }>>(() => {
     if (!status) return []
     const alerts: Array<{ tone: NoticeTone; title: string; message: string }> = []
-    if (updateAvailable) {
+    if (runtimeVersionInfo.manualBuild) {
+      alerts.push({
+        tone: 'neutral',
+        title: 'Manual runtime build detected',
+        message: runtimeVersionInfo.latest
+          ? `Installed ${runtimeVersionInfo.installed}. Auto-update only applies to signed release runtimes. Reinstall the published runtime to return to managed updates. Latest published runtime is ${runtimeVersionInfo.latest}.`
+          : `Installed ${runtimeVersionInfo.installed}. Auto-update only applies to signed release runtimes, so this node should be reinstalled from the published runtime channel.`,
+      })
+    } else if (updateAvailable) {
       alerts.push({
         tone: 'warn',
         title: 'Runtime update available',
-        message: `Installed ${status.version}. Latest published node runtime is ${status.latest_version}.`,
+        message: `Installed ${runtimeVersionInfo.installed}. Latest published node runtime is ${runtimeVersionInfo.latest}.`,
       })
     }
     if (status.register_error) {
@@ -329,7 +342,7 @@ function App() {
       })
     }
     return alerts.slice(0, 4)
-  }, [status, updateAvailable])
+  }, [runtimeVersionInfo, status, updateAvailable])
 
   const workloadMatrix = useMemo<WorkloadReadiness[]>(() => {
     const runtime = status?.runtime
@@ -633,6 +646,7 @@ function App() {
               localApiUrl={localApiUrl}
               localError={localError}
               updateAvailable={updateAvailable}
+              runtimeVersionInfo={runtimeVersionInfo}
               runtimeActionBusy={runtimeActionBusy}
               onCopy={handleCopy}
               onOpenExternal={openExternal}
@@ -712,6 +726,7 @@ function App() {
             onRuntimeAction={handleRuntimeAction}
             onRefreshRuntime={() => void refreshLocal()}
             updateAvailable={updateAvailable}
+            runtimeVersionInfo={runtimeVersionInfo}
           />
         ) : null}
         {activeView === 'settings' ? (
@@ -1304,6 +1319,7 @@ function DiagnosticsView({
   onRuntimeAction,
   onRefreshRuntime,
   updateAvailable,
+  runtimeVersionInfo,
 }: {
   status: OperatorStatusResponse | null
   hubUrl: string
@@ -1320,6 +1336,7 @@ function DiagnosticsView({
   onRuntimeAction: (action: 'restart' | 'repair') => void
   onRefreshRuntime: () => void
   updateAvailable: boolean
+  runtimeVersionInfo: RuntimeVersionInfo
 }) {
   return (
     <div className="view-grid">
@@ -1332,6 +1349,7 @@ function DiagnosticsView({
         localApiUrl={localApiUrl}
         localError={localError}
         updateAvailable={updateAvailable}
+        runtimeVersionInfo={runtimeVersionInfo}
         runtimeActionBusy={runtimeActionBusy}
         onCopy={onCopy}
         onOpenExternal={onOpenExternal}
@@ -1350,7 +1368,8 @@ function DiagnosticsView({
         <dl className="definition-list">
           <div><dt>Local API</dt><dd>{localApiUrl}</dd></div>
           <div><dt>Hub</dt><dd>{status?.hub_url || hubUrl}</dd></div>
-          <div><dt>Version</dt><dd>{status ? `${status.version}${status.latest_version ? ` · latest ${status.latest_version}` : ''}` : 'Unavailable'}</dd></div>
+          <div><dt>Version</dt><dd>{runtimeVersionInfo.display}</dd></div>
+          <div><dt>Runtime binary</dt><dd>{runtimeProbe?.active_binary_path || runtimeProbe?.binary_paths[0] || 'Unknown'}</dd></div>
           <div><dt>Native model</dt><dd>{status?.runtime.native_model || 'Not loaded'}</dd></div>
         </dl>
         <div className="inline-actions">
@@ -1379,7 +1398,7 @@ function DiagnosticsView({
                 value={`${issue.message}${issue.updated_at ? ` · ${formatRelative(issue.updated_at)}` : ''}`}
               />
             ))}
-            <MiniStat label="Runtime version" value={status ? `${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}` : 'Unavailable'} />
+            <MiniStat label="Runtime version" value={runtimeVersionInfo.display} />
           </div>
         ) : (
           <div className="stack">
@@ -1387,7 +1406,7 @@ function DiagnosticsView({
             <MiniStat label="Heartbeat" value="Clear" />
             <MiniStat label="Claim" value="Clear" />
             <MiniStat label="Payout" value="Clear" />
-            <MiniStat label="Runtime version" value={status ? `${status.version}${updateAvailable && status.latest_version ? ` → ${status.latest_version}` : ''}` : 'Unavailable'} />
+            <MiniStat label="Runtime version" value={runtimeVersionInfo.display} />
           </div>
         )}
       </section>
@@ -1450,6 +1469,7 @@ function RuntimeDoctorPanel({
   localApiUrl,
   localError,
   updateAvailable,
+  runtimeVersionInfo,
   runtimeActionBusy,
   onCopy,
   onOpenExternal,
@@ -1465,6 +1485,7 @@ function RuntimeDoctorPanel({
   localApiUrl: string
   localError: string
   updateAvailable: boolean
+  runtimeVersionInfo: RuntimeVersionInfo
   runtimeActionBusy: 'restart' | 'repair' | null
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
@@ -1473,8 +1494,8 @@ function RuntimeDoctorPanel({
   onRefreshRuntime: () => void
 }) {
   const findings = useMemo(
-    () => buildDoctorFindings({ status, diagnostics, runtimeProbe, runtimeAttempts, localError, updateAvailable }),
-    [status, diagnostics, runtimeProbe, runtimeAttempts, localError, updateAvailable],
+    () => buildDoctorFindings({ status, diagnostics, runtimeProbe, runtimeAttempts, localError, updateAvailable, runtimeVersionInfo }),
+    [status, diagnostics, runtimeProbe, runtimeAttempts, localError, updateAvailable, runtimeVersionInfo],
   )
 
   const summary = useMemo(() => {
@@ -1827,6 +1848,75 @@ function ThemeToggle({ value, onChange }: { value: ThemeMode; onChange: (theme: 
   )
 }
 
+function describeRuntimeVersion(status: OperatorStatusResponse | null): RuntimeVersionInfo {
+  if (!status) {
+    return {
+      installed: '',
+      latest: '',
+      display: 'Unavailable',
+      updateAvailable: false,
+      manualBuild: false,
+    }
+  }
+
+  const installed = status.version?.trim() || 'unknown'
+  const latest = status.latest_version?.trim() || ''
+  const manualBuild = installed.toLowerCase() === 'dev' || !parseRuntimeSemver(installed)
+  const updateAvailable = !manualBuild && hasPublishedRuntimeUpdate(installed, latest)
+
+  if (manualBuild) {
+    return {
+      installed,
+      latest,
+      display: latest ? `${installed} · manual build · latest ${latest}` : `${installed} · manual build`,
+      updateAvailable,
+      manualBuild,
+    }
+  }
+
+  if (updateAvailable && latest) {
+    return {
+      installed,
+      latest,
+      display: `${installed} -> ${latest}`,
+      updateAvailable,
+      manualBuild,
+    }
+  }
+
+  return {
+    installed,
+    latest,
+    display: latest ? `${installed} · latest ${latest}` : installed,
+    updateAvailable,
+    manualBuild,
+  }
+}
+
+function hasPublishedRuntimeUpdate(current: string, latest: string) {
+  const currentParts = parseRuntimeSemver(current)
+  const latestParts = parseRuntimeSemver(latest)
+  if (!currentParts || !latestParts) return false
+  for (let index = 0; index < latestParts.length; index += 1) {
+    if (latestParts[index] > currentParts[index]) return true
+    if (latestParts[index] < currentParts[index]) return false
+  }
+  return false
+}
+
+function parseRuntimeSemver(value?: string | null) {
+  const trimmed = value?.trim()
+  if (!trimmed) return null
+  const normalized = trimmed.replace(/^v/i, '')
+  const segments = normalized.split('.', 3)
+  if (segments.length !== 3) return null
+  const parts = segments.map((segment) => {
+    const core = segment.split('-', 1)[0]
+    return Number.parseInt(core, 10)
+  })
+  return parts.every((part) => Number.isInteger(part)) ? parts : null
+}
+
 function buildDoctorFindings({
   status,
   diagnostics,
@@ -1834,6 +1924,7 @@ function buildDoctorFindings({
   runtimeAttempts,
   localError,
   updateAvailable,
+  runtimeVersionInfo,
 }: {
   status: OperatorStatusResponse | null
   diagnostics: OperatorDiagnosticsResponse | null
@@ -1841,6 +1932,7 @@ function buildDoctorFindings({
   runtimeAttempts: LocalRuntimeAttempt[]
   localError: string
   updateAvailable: boolean
+  runtimeVersionInfo: RuntimeVersionInfo
 }): DoctorFinding[] {
   const findings: DoctorFinding[] = []
 
@@ -1901,6 +1993,17 @@ function buildDoctorFindings({
     })
   }
 
+  if (runtimeProbe?.service_running && runtimeProbe.active_binary_path && !runtimeProbe.service_uses_managed_binary) {
+    findings.push({
+      key: 'runtime-unmanaged-binary',
+      title: 'Service is running a manual workspace binary',
+      severity: 'medium',
+      summary: `The node service is starting ${runtimeProbe.active_binary_path} instead of the managed runtime path ${runtimeProbe.managed_binary_path || '/usr/local/bin/ryvion-node'}.`,
+      detail: 'This usually means the launch agent was pointed at a local source build. Reinstall or repair the runtime so auto-updates and release-version reporting work again.',
+      actions: ['repair-runtime', 'copy-install-command', 'refresh-runtime'],
+    })
+  }
+
   if (runtimeProbe?.api_url_mismatch) {
     findings.push({
       key: 'api-mismatch',
@@ -1911,12 +2014,23 @@ function buildDoctorFindings({
     })
   }
 
-  if (updateAvailable && status?.latest_version) {
+  if (runtimeVersionInfo.manualBuild) {
+    findings.push({
+      key: 'runtime-manual-build',
+      title: 'Runtime is a manual or dev build',
+      severity: 'low',
+      summary: runtimeVersionInfo.latest
+        ? `Installed ${runtimeVersionInfo.installed}. Auto-update only applies to signed release runtimes, and the latest published runtime is ${runtimeVersionInfo.latest}.`
+        : `Installed ${runtimeVersionInfo.installed}. Auto-update only applies to signed release runtimes.`,
+      detail: 'Reinstall the published runtime if you want this node to return to the managed update channel.',
+      actions: ['repair-runtime', 'copy-install-command', 'open-operator-guide'],
+    })
+  } else if (updateAvailable && status?.latest_version) {
     findings.push({
       key: 'runtime-update',
       title: 'Runtime update available',
       severity: 'low',
-      summary: `Installed ${status.version}. Latest published runtime is ${status.latest_version}.`,
+      summary: `Installed ${runtimeVersionInfo.installed}. Latest published runtime is ${runtimeVersionInfo.latest}.`,
       detail: 'Update during the next maintenance window so the node keeps new workload and operator features.',
       actions: ['open-operator-guide'],
     })
