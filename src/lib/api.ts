@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { readCloudToken, readStoredValue, STORAGE_KEYS } from './storage'
 
-export const DEFAULT_HUB_URL = 'https://ryvion-hub.fly.dev'
+export const DEFAULT_HUB_URL = 'https://api.ryvion.ai'
 export const DEFAULT_LOCAL_API_URL = 'http://127.0.0.1:45890'
 
 export interface OperatorJob {
@@ -41,13 +41,27 @@ export interface OperatorStatusResponse {
   runtime: {
     local_api_url: string
     status_message?: string
-    docker_cli_present: boolean
-    docker_ready: boolean
-    docker_gpu_enabled: boolean
+    runtime_ready: boolean
+    runtime_gpu_ready: boolean
+    runtime_health?: string
+    runtime_version?: string
+    runtime_channel?: string
+    runtime_provider?: string
+    runtime_mode?: string
+    runtime_source?: string
+    runtime_artifact?: string
+    runtime_binary?: string
+    runtime_backend?: string
+    runtime_backend_present: boolean
+    runtime_manifest_hash?: string
+    managed_oci_gpu_ready: boolean
     gpu_ready: boolean
     spatial_ready: boolean
+    public_ai_opt_in?: boolean
+    public_ai_ready: boolean
     native_inference_supported: boolean
     native_inference_ready: boolean
+    public_inference_ready: boolean
     native_model?: string
     disk_gb?: number
   }
@@ -158,6 +172,32 @@ export interface LocalRuntimeSnapshotResponse {
 export interface RuntimeActionResponse {
   launched: boolean
   message: string
+}
+
+export interface DownloadInfo {
+  version: string
+  platforms: {
+    windows: { installer: string; binary: string; arch: string[] }
+    macos: { installer: string; binary: string; arch: string[] }
+    linux: { installer: string; binary: string; arm64: string; arch: string[] }
+  }
+  install_commands: {
+    windows: string
+    macos: string
+    linux: string
+  }
+  managed_runtime?: {
+    channel: string
+    version: string
+    manifest_hash: string
+    manifest_url: string
+    description: string
+    platforms: {
+      windows: { mode: string; provider: string; label: string; source: string; auto_provision: boolean; install_url: string; bootstrap_url?: string; repair_command: string; notes: string[]; artifact: { file_name: string; format: string; entry_point: string; url: string; checksum_url: string; signature_url?: string; install_root_hint?: string } }
+      macos: { mode: string; provider: string; label: string; source: string; auto_provision: boolean; install_url: string; repair_command: string; notes: string[]; artifact: { file_name: string; format: string; entry_point: string; url: string; checksum_url: string; signature_url?: string; install_root_hint?: string } }
+      linux: { mode: string; provider: string; label: string; source: string; auto_provision: boolean; install_url: string; bootstrap_url?: string; repair_command: string; notes: string[]; artifact: { file_name: string; format: string; entry_point: string; url: string; checksum_url: string; signature_url?: string; install_root_hint?: string } }
+    }
+  }
 }
 
 export interface LoginResponse {
@@ -359,6 +399,13 @@ export function savePayoutPreference(
   })
 }
 
+export function setPublicAIPreference(enabled: boolean, baseUrl = getStoredLocalAPIUrl()) {
+  return request<OperatorStatusResponse>(baseUrl, '/api/v1/operator/preferences/public-ai', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
+}
+
 export function createConnectAccount(email: string, country: string, baseUrl = getStoredLocalAPIUrl()) {
   return request<{ account_id: string }>(baseUrl, '/api/v1/operator/connect/create', {
     method: 'POST',
@@ -403,6 +450,10 @@ export function getOperatorStats(baseUrl: string, token?: string) {
   })
 }
 
+export function getDownloadInfo(baseUrl = getStoredHubUrl()) {
+  return request<DownloadInfo>(baseUrl, '/api/v1/downloads/info')
+}
+
 export function generateClaimCode(baseUrl: string, token?: string) {
   return request<ClaimCodeResponse>(baseUrl, '/api/v1/marketplace/operator/generate-claim-code', {
     method: 'POST',
@@ -410,22 +461,24 @@ export function generateClaimCode(baseUrl: string, token?: string) {
   })
 }
 
-export function probeLocalRuntime(baseUrl = getStoredLocalAPIUrl()) {
-  return invoke<LocalRuntimeProbeResponse>('probe_local_runtime', { apiUrl: baseUrl })
+export function probeLocalRuntime(baseUrl = getStoredLocalAPIUrl(), hubUrl = getStoredHubUrl()) {
+  return invoke<LocalRuntimeProbeResponse>('probe_local_runtime', { apiUrl: baseUrl, hubUrl })
 }
 
-export function loadLocalRuntimeSnapshot(baseUrl = getStoredLocalAPIUrl()) {
-  return invoke<LocalRuntimeSnapshotResponse>('load_local_runtime_snapshot', { apiUrl: baseUrl })
+export function loadLocalRuntimeSnapshot(baseUrl = getStoredLocalAPIUrl(), hubUrl = getStoredHubUrl()) {
+  return invoke<LocalRuntimeSnapshotResponse>('load_local_runtime_snapshot', { apiUrl: baseUrl, hubUrl })
 }
 
 export function runLocalRuntimeAction(
   action: 'restart' | 'repair',
   baseUrl = getStoredLocalAPIUrl(),
   hubUrl = getStoredHubUrl(),
+  repairCommand?: string,
 ) {
   return invoke<RuntimeActionResponse>('run_local_runtime_action', {
     action,
     apiUrl: baseUrl,
     hubUrl,
+    repairCommand,
   })
 }

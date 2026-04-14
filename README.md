@@ -7,7 +7,7 @@ It is designed for operators, not buyers.
 ## What it does
 
 - Connects to the local `ryvion-node` operator API on `http://127.0.0.1:45890`
-- Shows live machine posture: CPU, RAM, GPU, Docker, native inference state
+- Shows live machine posture: CPU, RAM, GPU, managed execution runtime, native inference state
 - Tracks the current job, recent jobs, and local runtime logs
 - Handles node claim flow with short claim codes
 - Handles Stripe Connect payout onboarding and payout preference save

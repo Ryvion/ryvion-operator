@@ -7,6 +7,7 @@ import {
   DEFAULT_HUB_URL,
   DEFAULT_LOCAL_API_URL,
   generateClaimCode,
+  getDownloadInfo,
   getConnectOnboardingLink,
   getConnectStatus,
   getOperatorStats,
@@ -16,10 +17,12 @@ import {
   getStoredHubUrl,
   getStoredLocalAPIUrl,
   login,
+  type DownloadInfo,
   type LocalRuntimeAttempt,
   type LocalRuntimeProbeResponse,
   type OperatorDiagnosticsResponse,
   savePayoutPreference,
+  setPublicAIPreference,
   signup,
   type OperatorJob,
   type OperatorStatusResponse,
@@ -113,6 +116,7 @@ function App() {
   const [runtimeProbe, setRuntimeProbe] = useState<LocalRuntimeProbeResponse | null>(null)
   const [runtimeAttempts, setRuntimeAttempts] = useState<LocalRuntimeAttempt[]>([])
   const [runtimeActionBusy, setRuntimeActionBusy] = useState<'restart' | 'repair' | null>(null)
+  const [publicParticipationBusy, setPublicParticipationBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
@@ -128,6 +132,7 @@ function App() {
   const [claimInput, setClaimInput] = useState('')
   const [actionMessage, setActionMessage] = useState('')
   const [actionError, setActionError] = useState('')
+  const [downloadInfo, setDownloadInfo] = useState<DownloadInfo | null>(null)
 
   const [connectEmail, setConnectEmail] = useState('')
   const [connectCountry, setConnectCountry] = useState('CA')
@@ -163,6 +168,20 @@ function App() {
   useEffect(() => {
     writeStoredValue(STORAGE_KEYS.connectAccount, connectAccountId)
   }, [connectAccountId])
+
+  useEffect(() => {
+    let cancelled = false
+    void getDownloadInfo(hubUrl || DEFAULT_HUB_URL)
+      .then((info) => {
+        if (!cancelled) setDownloadInfo(info)
+      })
+      .catch(() => {
+        if (!cancelled) setDownloadInfo(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hubUrl])
 
   const openExternal = useCallback(async (url: string) => {
     try {
@@ -208,7 +227,7 @@ function App() {
 
   const refreshLocal = useCallback(async () => {
     try {
-      const snapshot = await loadLocalRuntimeSnapshot(localApiUrl)
+      const snapshot = await loadLocalRuntimeSnapshot(localApiUrl, hubUrl || DEFAULT_HUB_URL)
       setRuntimeProbe(snapshot.probe ?? null)
       setRuntimeAttempts(snapshot.attempts ?? [])
       if (snapshot.ok && snapshot.status) {
@@ -234,7 +253,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [applyLocalSnapshot, localApiUrl])
+  }, [applyLocalSnapshot, hubUrl, localApiUrl])
 
   const refreshCloud = useCallback(async () => {
     if (!cloudToken) {
@@ -292,7 +311,7 @@ function App() {
     return 'healthy'
   }, [status])
 
-  const runtimeVersionInfo = useMemo(() => describeRuntimeVersion(status), [status])
+  const runtimeVersionInfo = useMemo(() => describeRuntimeVersion(status, downloadInfo), [downloadInfo, status])
   const updateAvailable = runtimeVersionInfo.updateAvailable
 
   const runtimeAlerts = useMemo<Array<{ tone: NoticeTone; title: string; message: string }>>(() => {
@@ -310,7 +329,7 @@ function App() {
       alerts.push({
         tone: 'warn',
         title: 'Runtime update available',
-        message: `Installed ${runtimeVersionInfo.installed}. Latest published node runtime is ${runtimeVersionInfo.latest}.`,
+        message: `Installed ${runtimeVersionInfo.installed}. Latest published runtime channel build is ${runtimeVersionInfo.latest}.`,
       })
     }
     if (status.register_error) {
@@ -327,11 +346,11 @@ function App() {
         message: status.last_heartbeat_error,
       })
     }
-    if (!status.runtime.docker_ready) {
+    if (!status.runtime.runtime_ready) {
       alerts.push({
         tone: 'neutral',
         title: 'Container workloads unavailable',
-        message: 'Docker is not reachable, so media, embedding, and other OCI workloads cannot land on this node.',
+        message: 'The managed execution runtime is not ready, so media, embedding, agent hosting, and other OCI workloads cannot land on this node.',
       })
     }
     if (!status.declared_country) {
@@ -355,39 +374,39 @@ function App() {
     return [
       {
         name: 'Gateway inference',
-        ready: runtime.native_inference_ready || runtime.docker_ready,
+        ready: runtime.native_inference_ready || runtime.runtime_ready,
         reason: runtime.native_inference_ready
           ? 'Native inference runtime is healthy.'
-          : runtime.docker_ready
-            ? 'Container runtime is ready for gateway-backed jobs.'
-            : 'Requires a healthy native runtime or Docker daemon.',
-        requirements: ['Native model or Docker runtime', 'Stable CPU/RAM headroom'],
+          : runtime.runtime_ready
+            ? 'Execution runtime is ready for gateway-backed jobs.'
+            : 'Requires a healthy native runtime or managed OCI runtime.',
+        requirements: ['Native model or execution runtime', 'Stable CPU/RAM headroom'],
         blockers: [
-          ...(runtime.native_inference_ready || runtime.docker_ready ? [] : ['Neither native inference nor Docker is ready']),
+          ...(runtime.native_inference_ready || runtime.runtime_ready ? [] : ['Neither native inference nor the managed runtime is ready']),
         ],
-        recommended: runtime.native_inference_ready ? 'Keep the native model loaded for the lowest-latency gateway path.' : 'Bring Docker or the native model path online.',
+        recommended: runtime.native_inference_ready ? 'Keep the native model loaded for the lowest-latency gateway path.' : 'Bring the managed runtime or the native model path online.',
       },
       {
         name: 'Embeddings pipeline',
-        ready: runtime.native_inference_ready || runtime.docker_ready,
+        ready: runtime.native_inference_ready || runtime.runtime_ready,
         reason: 'Runs through either the native model or the container path.',
-        requirements: ['Native model or Docker runtime', 'At least 8 GB system RAM'],
+        requirements: ['Native model or execution runtime', 'At least 8 GB system RAM'],
         blockers: [
-          ...(runtime.native_inference_ready || runtime.docker_ready ? [] : ['No eligible execution path is ready']),
+          ...(runtime.native_inference_ready || runtime.runtime_ready ? [] : ['No eligible execution path is ready']),
           ...(ramGB >= 8 ? [] : ['System RAM below the practical embeddings floor']),
         ],
-        recommended: 'Embeddings remain more stable when Docker is available and system memory is not saturated.',
+        recommended: 'Embeddings remain more stable when the execution runtime is healthy and system memory is not saturated.',
       },
       {
         name: 'Video transcode',
-        ready: runtime.docker_ready,
-        reason: runtime.docker_ready ? 'Docker is available for FFmpeg workloads.' : 'Requires Docker runtime availability.',
-        requirements: ['Docker runtime', 'At least 8 GB free disk or scratch space'],
+        ready: runtime.runtime_ready,
+        reason: runtime.runtime_ready ? 'The managed runtime is available for FFmpeg workloads.' : 'Requires managed OCI runtime availability.',
+        requirements: ['Execution runtime', 'At least 8 GB free disk or scratch space'],
         blockers: [
-          ...(runtime.docker_ready ? [] : ['Docker daemon is not reachable']),
+          ...(runtime.runtime_ready ? [] : ['Execution runtime is not reachable']),
           ...((runtime.disk_gb ?? 0) >= 8 ? [] : ['Less than 8 GB scratch capacity reported by health checks']),
         ],
-        recommended: 'Keep Docker running before login so transcode jobs can land immediately after heartbeat.',
+        recommended: 'Keep the execution runtime healthy before login so transcode jobs can land immediately after heartbeat.',
       },
       {
         name: 'Spatial stages',
@@ -526,7 +545,15 @@ function App() {
     setRuntimeActionBusy(action)
     setActionError('')
     try {
-      const response = await runLocalRuntimeAction(action, localApiUrl, status?.hub_url || hubUrl || DEFAULT_HUB_URL)
+      const repairCommand = action === 'repair'
+        ? resolveRuntimeInstallCommand(downloadInfo, runtimeProbe?.platform)
+        : undefined
+      const response = await runLocalRuntimeAction(
+        action,
+        localApiUrl,
+        status?.hub_url || hubUrl || DEFAULT_HUB_URL,
+        repairCommand,
+      )
       setActionMessage(response.message)
       window.setTimeout(() => {
         void refreshLocal()
@@ -536,7 +563,27 @@ function App() {
     } finally {
       setRuntimeActionBusy(null)
     }
-  }, [hubUrl, localApiUrl, refreshLocal, status?.hub_url])
+  }, [downloadInfo, hubUrl, localApiUrl, refreshLocal, runtimeProbe?.platform, status?.hub_url])
+
+  const handlePublicParticipationChange = useCallback(async (enabled: boolean) => {
+    setPublicParticipationBusy(true)
+    setActionError('')
+    try {
+      const nextStatus = await setPublicAIPreference(enabled, localApiUrl)
+      nextStatus.metrics = normalizeMetrics(nextStatus.metrics)
+      setStatus(nextStatus)
+      setActionMessage(
+        enabled
+          ? 'Public participation enabled. Buyer-facing AI jobs can now be considered when the node is otherwise eligible.'
+          : 'Public participation disabled. This node stays private for buyer-facing AI jobs.',
+      )
+      void refreshLocal()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to update public participation')
+    } finally {
+      setPublicParticipationBusy(false)
+    }
+  }, [localApiUrl, refreshLocal])
 
   const handleRefreshConnectStatus = useCallback(async () => {
     if (!connectAccountId) return
@@ -648,6 +695,7 @@ function App() {
               updateAvailable={updateAvailable}
               runtimeVersionInfo={runtimeVersionInfo}
               runtimeActionBusy={runtimeActionBusy}
+              runtimeInstallCommand={resolveRuntimeInstallCommand(downloadInfo, runtimeProbe?.platform)}
               onCopy={handleCopy}
               onOpenExternal={openExternal}
               onSetLocalApiUrl={setLocalApiUrl}
@@ -720,6 +768,7 @@ function App() {
             localApiUrl={localApiUrl}
             localError={localError}
             runtimeActionBusy={runtimeActionBusy}
+            runtimeInstallCommand={resolveRuntimeInstallCommand(downloadInfo, runtimeProbe?.platform)}
             onCopy={handleCopy}
             onOpenExternal={openExternal}
             onSetLocalApiUrl={setLocalApiUrl}
@@ -731,14 +780,18 @@ function App() {
         ) : null}
         {activeView === 'settings' ? (
           <SettingsView
+            status={status}
             theme={theme}
             localApiUrl={localApiUrl}
             hubUrl={hubUrl}
             declaredCountry={status?.declared_country}
             runtimeProbe={runtimeProbe}
+            downloadInfo={downloadInfo}
+            publicParticipationBusy={publicParticipationBusy}
             onThemeChange={setTheme}
             onLocalApiUrlChange={setLocalApiUrl}
             onHubUrlChange={setHubUrl}
+            onPublicParticipationChange={handlePublicParticipationChange}
             onOpenExternal={openExternal}
           />
         ) : null}
@@ -769,11 +822,17 @@ function OverviewView({
   onOpenExternal: (url: string) => void
 }) {
   const metrics = status.metrics
+  const publicParticipation = status.runtime.public_ai_opt_in ?? status.runtime.public_ai_ready
+  const publicParticipationDetail = publicParticipation
+    ? status.runtime.public_inference_ready
+      ? 'Explicitly enabled for buyer-facing AI jobs.'
+      : 'Explicitly enabled. Waiting on runtime eligibility before buyer-facing AI jobs can land.'
+    : 'Private by default. Opt in from Settings to expose buyer-facing AI jobs.'
   return (
     <div className="view-grid">
       <section className="metric-grid metric-grid--four">
         <MetricCard title="Node state" value={status.registered ? 'Registered' : 'Pending'} detail={status.last_heartbeat_error || status.register_error || 'Control plane reachable.'} />
-        <MetricCard title="Docker" value={status.runtime.docker_ready ? 'Ready' : 'Unavailable'} detail={status.runtime.docker_gpu_enabled ? 'GPU runtime enabled.' : 'CPU / general container path only.'} />
+        <MetricCard title="Runtime" value={status.runtime.runtime_ready ? 'Ready' : 'Unavailable'} detail={status.runtime.runtime_gpu_ready ? 'GPU runtime enabled.' : 'CPU / general OCI path only.'} />
         <MetricCard title="Machine load" value={formatPercent(Math.max(metrics.cpu_util ?? 0, metrics.mem_util ?? 0))} detail={`CPU ${formatPercent(metrics.cpu_util)} · RAM ${formatPercent(metrics.mem_util)} · GPU ${formatPercent(metrics.gpu_util)}`} />
         <MetricCard title="Cloud earnings" value={cloudStats ? formatCurrency(cloudStats.total_earnings_cents) : 'Connect account'} detail={cloudStats ? `${cloudStats.node_count} linked nodes · ${formatCurrency(cloudStats.total_pending_earnings_cents)} pending` : 'Sign in to see operator earnings and claim codes.'} />
       </section>
@@ -810,9 +869,9 @@ function OverviewView({
           </div>
         </dl>
         <div className="runtime-checks">
-          <CheckRow label="Docker CLI" state={status.runtime.docker_cli_present} />
-          <CheckRow label="Container runtime" state={status.runtime.docker_ready} />
-          <CheckRow label="GPU runtime" state={status.runtime.docker_gpu_enabled || status.runtime.gpu_ready} />
+          <CheckRow label="Execution runtime" state={status.runtime.runtime_ready} detail={status.runtime.runtime_health || 'No runtime health reported'} />
+          <CheckRow label="Runtime GPU path" state={status.runtime.runtime_gpu_ready || status.runtime.gpu_ready} />
+          <CheckRow label="Public participation" state={publicParticipation} detail={publicParticipationDetail} />
           <CheckRow label="Native inference" state={status.runtime.native_inference_ready} detail={status.runtime.native_model || 'No native model loaded'} />
         </div>
       </section>
@@ -1313,6 +1372,7 @@ function DiagnosticsView({
   localApiUrl,
   localError,
   runtimeActionBusy,
+  runtimeInstallCommand,
   onCopy,
   onOpenExternal,
   onSetLocalApiUrl,
@@ -1330,6 +1390,7 @@ function DiagnosticsView({
   localApiUrl: string
   localError: string
   runtimeActionBusy: 'restart' | 'repair' | null
+  runtimeInstallCommand?: string
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
   onSetLocalApiUrl: (value: string) => void
@@ -1351,6 +1412,7 @@ function DiagnosticsView({
         updateAvailable={updateAvailable}
         runtimeVersionInfo={runtimeVersionInfo}
         runtimeActionBusy={runtimeActionBusy}
+        runtimeInstallCommand={runtimeInstallCommand}
         onCopy={onCopy}
         onOpenExternal={onOpenExternal}
         onSetLocalApiUrl={onSetLocalApiUrl}
@@ -1471,6 +1533,7 @@ function RuntimeDoctorPanel({
   updateAvailable,
   runtimeVersionInfo,
   runtimeActionBusy,
+  runtimeInstallCommand,
   onCopy,
   onOpenExternal,
   onSetLocalApiUrl,
@@ -1487,6 +1550,7 @@ function RuntimeDoctorPanel({
   updateAvailable: boolean
   runtimeVersionInfo: RuntimeVersionInfo
   runtimeActionBusy: 'restart' | 'repair' | null
+  runtimeInstallCommand?: string
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
   onSetLocalApiUrl: (value: string) => void
@@ -1548,6 +1612,7 @@ function RuntimeDoctorPanel({
                     hubUrl={hubUrl}
                     localApiUrl={localApiUrl}
                     runtimeActionBusy={runtimeActionBusy}
+                    runtimeInstallCommand={runtimeInstallCommand}
                     onCopy={onCopy}
                     onOpenExternal={onOpenExternal}
                     onSetLocalApiUrl={onSetLocalApiUrl}
@@ -1599,6 +1664,7 @@ function DoctorActionButton({
   hubUrl,
   localApiUrl,
   runtimeActionBusy,
+  runtimeInstallCommand,
   onCopy,
   onOpenExternal,
   onSetLocalApiUrl,
@@ -1610,6 +1676,7 @@ function DoctorActionButton({
   hubUrl: string
   localApiUrl: string
   runtimeActionBusy: 'restart' | 'repair' | null
+  runtimeInstallCommand?: string
   onCopy: (value: string, message: string) => void
   onOpenExternal: (url: string) => void
   onSetLocalApiUrl: (value: string) => void
@@ -1647,7 +1714,10 @@ function DoctorActionButton({
       )
     case 'copy-install-command':
       return runtimeProbe ? (
-        <button className="ghost-button" onClick={() => onCopy(runtimeProbe.install_command, 'Copied install command.')}>
+        <button
+          className="ghost-button"
+          onClick={() => onCopy(runtimeInstallCommand || runtimeProbe.install_command, 'Copied install command.')}
+        >
           Copy install command
         </button>
       ) : null
@@ -1697,27 +1767,76 @@ function normalizeMetrics(metrics: OperatorStatusResponse['metrics']) {
   }
 }
 
+function resolveManagedRuntimePlatform(downloadInfo: DownloadInfo | null, platform?: string | null) {
+  if (!downloadInfo?.managed_runtime || !platform) return null
+  switch (platform) {
+    case 'windows':
+      return downloadInfo.managed_runtime.platforms.windows
+    case 'macos':
+      return downloadInfo.managed_runtime.platforms.macos
+    case 'linux':
+      return downloadInfo.managed_runtime.platforms.linux
+    default:
+      return null
+  }
+}
+
+function resolveRuntimeInstallCommand(downloadInfo: DownloadInfo | null, platform?: string | null) {
+  const managedRuntime = resolveManagedRuntimePlatform(downloadInfo, platform)
+  if (managedRuntime?.repair_command) return managedRuntime.repair_command
+  if (!downloadInfo || !platform) return undefined
+  switch (platform) {
+    case 'windows':
+      return downloadInfo.install_commands.windows
+    case 'macos':
+      return downloadInfo.install_commands.macos
+    case 'linux':
+      return downloadInfo.install_commands.linux
+    default:
+      return undefined
+  }
+}
+
 function SettingsView({
+  status,
   theme,
   localApiUrl,
   hubUrl,
   declaredCountry,
   runtimeProbe,
+  downloadInfo,
+  publicParticipationBusy,
   onThemeChange,
   onLocalApiUrlChange,
   onHubUrlChange,
+  onPublicParticipationChange,
   onOpenExternal,
 }: {
+  status: OperatorStatusResponse | null
   theme: ThemeMode
   localApiUrl: string
   hubUrl: string
   declaredCountry?: string
   runtimeProbe: LocalRuntimeProbeResponse | null
+  downloadInfo: DownloadInfo | null
+  publicParticipationBusy: boolean
   onThemeChange: (theme: ThemeMode) => void
   onLocalApiUrlChange: (value: string) => void
   onHubUrlChange: (value: string) => void
+  onPublicParticipationChange: (enabled: boolean) => void
   onOpenExternal: (url: string) => void
 }) {
+  const publicParticipation = status?.runtime.public_ai_opt_in ?? status?.runtime.public_ai_ready ?? false
+  const publicParticipationLabel = publicParticipation ? 'Opted in' : 'Private'
+  const runtimePlatform = resolveManagedRuntimePlatform(downloadInfo, runtimeProbe?.platform)
+  const runtimeChannel = status?.runtime.runtime_channel || downloadInfo?.managed_runtime?.channel || 'managed_oci_v1'
+  const runtimeChannelVersion = status?.runtime.runtime_version || downloadInfo?.managed_runtime?.version || 'unknown'
+  const runtimeProviderLabel = runtimePlatform?.label || status?.runtime.runtime_provider || 'Managed runtime'
+  const runtimeSource = status?.runtime.runtime_source || runtimePlatform?.source || 'managed_runtime_channel'
+  const runtimeArtifact = status?.runtime.runtime_artifact || runtimePlatform?.artifact.file_name || 'Not published'
+  const runtimeBinary = status?.runtime.runtime_binary || 'Unknown'
+  const runtimeBackend = status?.runtime.runtime_backend || status?.runtime.runtime_provider || 'Unknown'
+
   return (
     <div className="view-grid">
       <section className="panel">
@@ -1734,6 +1853,40 @@ function SettingsView({
             </button>
           ))}
         </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Participation policy</p>
+            <h2>Buyer-facing AI exposure</h2>
+          </div>
+          <StatusPill tone={publicParticipation ? 'good' : 'neutral'}>{publicParticipationLabel}</StatusPill>
+        </div>
+        <p className="support-copy">
+          Public participation is off by default. Enable it only on machines you explicitly want exposed to buyer-facing AI jobs and sovereign routing review.
+        </p>
+        <div className="segmented-control top-gap">
+          <button
+            className={!publicParticipation ? 'segment is-active' : 'segment'}
+            onClick={() => onPublicParticipationChange(false)}
+            disabled={publicParticipationBusy}
+          >
+            Keep private
+          </button>
+          <button
+            className={publicParticipation ? 'segment is-active' : 'segment'}
+            onClick={() => onPublicParticipationChange(true)}
+            disabled={publicParticipationBusy}
+          >
+            {publicParticipationBusy ? 'Updating…' : 'Allow buyer AI jobs'}
+          </button>
+        </div>
+        <p className="support-copy top-gap">
+          {publicParticipation
+            ? 'This preference is stored in the local node config and reflected in health reporting so the control plane can stop treating participation as an environment-only setting.'
+            : 'This preference is stored in the local node config so the operator app can keep the node private without any manual environment variable edits.'}
+        </p>
       </section>
 
       <section className="panel">
@@ -1763,6 +1916,34 @@ function SettingsView({
           <input value={hubUrl} onChange={(event) => onHubUrlChange(event.target.value)} />
         </label>
         <p className="support-copy">Declared country from the node: {declaredCountry || 'Not declared'}</p>
+        {runtimePlatform ? (
+          <div className="top-gap">
+            <p className="support-copy">
+              Managed runtime channel {runtimeChannel} · {runtimeChannelVersion} · {runtimeProviderLabel}
+            </p>
+            <p className="support-copy">
+              Source {runtimeSource} · Artifact {runtimeArtifact}
+            </p>
+            <p className="support-copy">
+              Wrapper {runtimeBinary} · Backend {runtimeBackend}
+            </p>
+            <div className="inline-actions top-gap">
+              <button className="ghost-button" onClick={() => void onOpenExternal(runtimePlatform.artifact.url)}>
+                Runtime kit
+              </button>
+              <button className="ghost-button" onClick={() => void onOpenExternal(runtimePlatform.artifact.checksum_url)}>
+                Runtime checksum
+              </button>
+            </div>
+            {runtimePlatform.notes?.length ? (
+              <ul className="bullet-list top-gap">
+                {runtimePlatform.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       <section className="panel panel-span-2">
@@ -1848,7 +2029,7 @@ function ThemeToggle({ value, onChange }: { value: ThemeMode; onChange: (theme: 
   )
 }
 
-function describeRuntimeVersion(status: OperatorStatusResponse | null): RuntimeVersionInfo {
+function describeRuntimeVersion(status: OperatorStatusResponse | null, downloadInfo: DownloadInfo | null): RuntimeVersionInfo {
   if (!status) {
     return {
       installed: '',
@@ -1859,8 +2040,8 @@ function describeRuntimeVersion(status: OperatorStatusResponse | null): RuntimeV
     }
   }
 
-  const installed = status.version?.trim() || 'unknown'
-  const latest = status.latest_version?.trim() || ''
+  const installed = status.runtime.runtime_version?.trim() || status.version?.trim() || 'unknown'
+  const latest = downloadInfo?.managed_runtime?.version?.trim() || status.latest_version?.trim() || ''
   const manualBuild = installed.toLowerCase() === 'dev' || !parseRuntimeSemver(installed)
   const updateAvailable = !manualBuild && hasPublishedRuntimeUpdate(installed, latest)
 
@@ -2036,13 +2217,13 @@ function buildDoctorFindings({
     })
   }
 
-  if (status && !status.runtime.docker_ready) {
+  if (status && !status.runtime.runtime_ready) {
     findings.push({
-      key: 'docker-unavailable',
-      title: 'Docker is not reachable',
+      key: 'runtime-unavailable',
+      title: 'Execution runtime is not reachable',
       severity: 'medium',
-      summary: 'Container-backed workloads cannot land until the Docker daemon is running and reachable.',
-      detail: 'Media, embedding, and most OCI workloads depend on Docker health on the local machine.',
+      summary: 'Managed OCI workloads cannot land until the local execution runtime is healthy.',
+      detail: 'Media, embedding, agent hosting, and most OCI workloads depend on runtime health on the local machine.',
       actions: ['copy-log-command', 'refresh-runtime'],
     })
   }

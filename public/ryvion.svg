@@ -1,3 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <image href="/brand/ryvion-logo.png" x="6" y="4" width="52" height="56" preserveAspectRatio="xMidYMid meet"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="falcon-body" x1="12" y1="52" x2="56" y2="13" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1831"/>
+      <stop offset="0.56" stop-color="#214CB2"/>
+      <stop offset="1" stop-color="#3D82FF"/>
+    </linearGradient>
+    <linearGradient id="falcon-wing" x1="18" y1="50" x2="46" y2="23" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F2B78"/>
+      <stop offset="0.48" stop-color="#2877FF"/>
+      <stop offset="1" stop-color="#58D9FF"/>
+    </linearGradient>
+    <linearGradient id="falcon-beak" x1="40" y1="14" x2="54" y2="19" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F3B256"/>
+      <stop offset="1" stop-color="#D96C21"/>
+    </linearGradient>
+  </defs>
+  <path d="M10.5 52.3C17.2 47.9 22.4 42.1 26.1 35L32.1 23.5C35.7 16.7 40.1 12.4 45.4 10.8C50.4 9.3 55.7 9.9 61.2 12.6C58 13.1 55.1 14.6 52.6 17C55.7 17.4 58.6 18.7 61 21C58.3 21.6 55.8 22.8 53.6 24.8C50.7 27.2 48.7 30.8 47.6 35.5C46.5 40.1 44.7 43.9 42.1 46.8C39.2 50.1 35.5 52.8 30.8 54.8C26.1 56.8 21 58 15.4 58.3L10.5 52.3Z" fill="url(#falcon-body)"/>
+  <path d="M15.6 50.3C22.9 46.8 29.1 41.2 34.2 33.4C37.8 28.1 41.7 23.9 46 20.8C44 27.1 41.5 33.2 38.5 39.1C35 45.9 28.1 50.6 19.2 53.1L15.6 50.3Z" fill="url(#falcon-wing)"/>
+  <path d="M47.2 21.1C50.1 20.3 53 20.4 55.9 21.4C54 22 52.2 23 50.5 24.6C49.1 23.8 48 22.7 47.2 21.1Z" fill="url(#falcon-beak)"/>
+  <path d="M38.9 20.6C42.6 17.7 46.7 16.8 51.2 18C53.4 18.5 55.7 19.7 58 21.6C55.7 21.5 53.6 22 51.6 23.1C49.8 24.1 48.3 25.6 47.1 27.8C43.8 27 41.1 24.6 38.9 20.6Z" fill="#081325"/>
+  <path d="M19.8 45.9C27.3 42.7 33.2 37.3 37.4 29.8" stroke="#FFFFFF" stroke-opacity=".28" stroke-width="2.2" stroke-linecap="round"/>
+  <ellipse cx="47.9" cy="20.2" rx="1.3" ry="1.6" fill="#F8FBFF"/>
+  <circle cx="47.9" cy="20.2" r=".7" fill="#081325"/>
 </svg>

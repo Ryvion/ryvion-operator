@@ -97,9 +97,7 @@ fn desktop_request(
             .body(body);
     }
 
-    let response = request
-        .send()
-        .map_err(|err| format!("{}: {}", url, err))?;
+    let response = request.send().map_err(|err| format!("{}: {}", url, err))?;
     let status = response.status();
     if status.as_u16() == 204 {
         return Ok(Value::Null);
@@ -115,8 +113,9 @@ fn desktop_request(
 }
 
 #[tauri::command]
-fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
-    let (host, port) = parse_host_port(&api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
+fn probe_local_runtime(api_url: String, _hub_url: Option<String>) -> LocalRuntimeProbe {
+    let (host, port) =
+        parse_host_port(&api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
     let api_port_open = tcp_open(&host, port);
 
     #[cfg(target_os = "macos")]
@@ -159,26 +158,45 @@ fn probe_local_runtime(api_url: String) -> LocalRuntimeProbe {
 }
 
 #[tauri::command]
-fn run_local_runtime_action(action: String, api_url: String, hub_url: Option<String>) -> Result<RuntimeActionResult, String> {
+fn run_local_runtime_action(
+    action: String,
+    api_url: String,
+    hub_url: Option<String>,
+    repair_command: Option<String>,
+) -> Result<RuntimeActionResult, String> {
     #[cfg(target_os = "macos")]
     {
-        return run_macos_runtime_action(&action, &api_url, hub_url.as_deref());
+        return run_macos_runtime_action(
+            &action,
+            &api_url,
+            hub_url.as_deref(),
+            repair_command.as_deref(),
+        );
     }
     #[cfg(target_os = "linux")]
     {
-        return run_linux_runtime_action(&action, &api_url, hub_url.as_deref());
+        return run_linux_runtime_action(
+            &action,
+            &api_url,
+            hub_url.as_deref(),
+            repair_command.as_deref(),
+        );
     }
     #[cfg(target_os = "windows")]
     {
-        return run_windows_runtime_action(&action, hub_url.as_deref());
+        return run_windows_runtime_action(&action, hub_url.as_deref(), repair_command.as_deref());
     }
     #[allow(unreachable_code)]
-    Err(format!("runtime action '{}' is not supported on {}", action, env::consts::OS))
+    Err(format!(
+        "runtime action '{}' is not supported on {}",
+        action,
+        env::consts::OS
+    ))
 }
 
 #[tauri::command]
-fn load_local_runtime_snapshot(api_url: String) -> LocalRuntimeSnapshot {
-    let probe = probe_local_runtime(api_url.clone());
+fn load_local_runtime_snapshot(api_url: String, hub_url: Option<String>) -> LocalRuntimeSnapshot {
+    let probe = probe_local_runtime(api_url.clone(), hub_url);
     let candidates = candidate_api_urls(&api_url, &probe);
     let client = match Client::builder().timeout(Duration::from_secs(4)).build() {
         Ok(client) => client,
@@ -243,7 +261,10 @@ fn load_local_runtime_snapshot(api_url: String) -> LocalRuntimeSnapshot {
         jobs: None,
         logs: None,
         diagnostics: None,
-        error: Some(last_error_or_default(&last_error, "Unable to reach the local operator API.")),
+        error: Some(last_error_or_default(
+            &last_error,
+            "Unable to reach the local operator API.",
+        )),
     }
 }
 
@@ -263,7 +284,10 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     if let Some(path) = active_binary_path.clone() {
         binary_candidates.insert(0, path);
     }
-    let installed = plist.exists() || binary_candidates.iter().any(|path| PathBuf::from(path).exists());
+    let installed = plist.exists()
+        || binary_candidates
+            .iter()
+            .any(|path| PathBuf::from(path).exists());
     let listed = command_output("launchctl", &["list"]).contains("com.ryvion.node");
     let service_running = listed;
     let uid = command_output("id", &["-u"]);
@@ -271,8 +295,10 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
-    let configured_port = extract_plist_ui_port(&plist_contents)
-        .or_else(|| find_flag_value_in_tokens(&plist_args, "-ui-port").and_then(|value| value.parse::<u16>().ok()));
+    let configured_port = extract_plist_ui_port(&plist_contents).or_else(|| {
+        find_flag_value_in_tokens(&plist_args, "-ui-port")
+            .and_then(|value| value.parse::<u16>().ok())
+    });
     let configured_api_url = configured_port.map(loopback_api_url);
     let configured_api_port_open = configured_port
         .map(|configured| tcp_open("127.0.0.1", configured))
@@ -286,11 +312,14 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
         .as_ref()
         .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
         .unwrap_or(false);
-    let suggested_api_url = configured_api_url.clone().unwrap_or_else(|| loopback_api_url(port));
+    let suggested_api_url = configured_api_url
+        .clone()
+        .unwrap_or_else(|| loopback_api_url(port));
 
     let mut notes = Vec::new();
     if !installed {
-        notes.push("Ryvion node runtime does not appear to be installed for this user.".to_string());
+        notes
+            .push("Ryvion node runtime does not appear to be installed for this user.".to_string());
     }
     if installed && !service_running {
         notes.push("The launch agent exists but does not appear to be loaded in the current login session.".to_string());
@@ -316,6 +345,7 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
             suggested_api_url
         ));
     }
+    notes.push("macOS installs the signed node service and local operator API for desktop control and native streaming. Managed OCI sovereign lanes are provisioned on Windows and Linux operator hosts.".to_string());
 
     LocalRuntimeProbe {
         platform: "macos".to_string(),
@@ -336,15 +366,24 @@ fn probe_macos(api_url: String, host: String, port: u16, api_port_open: bool) ->
         managed_binary_path,
         service_uses_managed_binary,
         log_path: Some(log_path.display().to_string()),
-        install_command: "curl -sSL https://ryvion-hub.fly.dev/install.sh?platform=macos | bash".to_string(),
-        start_command: Some(format!("launchctl kickstart -k gui/{}/com.ryvion.node", uid.trim())),
+        install_command: "curl -sSL https://api.ryvion.ai/install.sh?platform=macos | bash"
+            .to_string(),
+        start_command: Some(format!(
+            "launchctl kickstart -k gui/{}/com.ryvion.node",
+            uid.trim()
+        )),
         log_command: Some("tail -f ~/.ryvion/node.log".to_string()),
         notes,
     }
 }
 
 #[cfg(target_os = "macos")]
-fn run_macos_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) -> Result<RuntimeActionResult, String> {
+fn run_macos_runtime_action(
+    action: &str,
+    api_url: &str,
+    hub_url: Option<&str>,
+    repair_command: Option<&str>,
+) -> Result<RuntimeActionResult, String> {
     let home = env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
     let plist = PathBuf::from(&home).join("Library/LaunchAgents/com.ryvion.node.plist");
     let uid = command_output("id", &["-u"]);
@@ -353,7 +392,10 @@ fn run_macos_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) 
     match action {
         "restart" => {
             if !plist.exists() {
-                return Err("Launch agent is not installed yet. Run the repair installer first.".to_string());
+                return Err(
+                    "Launch agent is not installed yet. Run the repair installer first."
+                        .to_string(),
+                );
             }
             let plist_string = plist.display().to_string();
             let bootstrap = Command::new("launchctl")
@@ -361,7 +403,9 @@ fn run_macos_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) 
                 .status();
             if let Ok(status) = bootstrap {
                 if !status.success() {
-                    let _ = Command::new("launchctl").args(["load", &plist_string]).status();
+                    let _ = Command::new("launchctl")
+                        .args(["load", &plist_string])
+                        .status();
                 }
             }
             let status = Command::new("launchctl")
@@ -371,15 +415,26 @@ fn run_macos_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) 
             if !status.success() {
                 return Err("launchctl did not restart the Ryvion node service.".to_string());
             }
-            let (_, port) = parse_host_port(api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
+            let (_, port) =
+                parse_host_port(api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
             return Ok(RuntimeActionResult {
                 launched: true,
                 message: format!("Requested launchctl restart. Re-check http://127.0.0.1:{port}/healthz in a few seconds."),
             });
         }
         "repair" => {
-            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://ryvion-hub.fly.dev");
-            let script = format!("curl -sSL '{}/install.sh?platform=macos' | bash", hub.trim_end_matches('/'));
+            let hub = hub_url
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or("https://api.ryvion.ai");
+            let script = repair_command
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "curl -sSL '{}/install.sh?platform=macos' | bash",
+                        hub.trim_end_matches('/')
+                    )
+                });
             let apple_script = format!(
                 "tell application \"Terminal\" to do script \"{}\"\nactivate application \"Terminal\"",
                 escape_applescript(&script)
@@ -393,9 +448,9 @@ fn run_macos_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) 
                 return Err("Terminal did not start the repair installer.".to_string());
             }
             return Ok(RuntimeActionResult {
-                launched: true,
-                message: "Opened Terminal with the Ryvion macOS installer. Follow any password prompts, then refresh the app.".to_string(),
-            });
+                    launched: true,
+                    message: "Opened Terminal with the Ryvion macOS installer. It will reinstall the signed node service and local operator API; refresh the app after it completes.".to_string(),
+                });
         }
         _ => Err(format!("Unsupported runtime action: {action}")),
     }
@@ -437,7 +492,9 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
         .as_ref()
         .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
         .unwrap_or(false);
-    let suggested_api_url = configured_api_url.clone().unwrap_or_else(|| loopback_api_url(port));
+    let suggested_api_url = configured_api_url
+        .clone()
+        .unwrap_or_else(|| loopback_api_url(port));
 
     let mut notes = Vec::new();
     if !service_installed {
@@ -453,7 +510,9 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
         notes.push("The installed ryvion-node binary predates local operator API support. Reinstall or update the node runtime.".to_string());
     }
     if service_running && !api_port_open {
-        notes.push("The service is active, but the local operator API port is not reachable.".to_string());
+        notes.push(
+            "The service is active, but the local operator API port is not reachable.".to_string(),
+        );
     }
     if api_url_mismatch {
         notes.push(format!(
@@ -481,10 +540,13 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
         managed_binary_path: Some("/opt/ryvion/ryvion-node".to_string()),
         service_uses_managed_binary: exec_start
             .as_deref()
-            .map(|path| path.trim() == "/opt/ryvion/ryvion-node" || path.trim() == "/usr/local/bin/ryvion-node")
+            .map(|path| {
+                path.trim() == "/opt/ryvion/ryvion-node"
+                    || path.trim() == "/usr/local/bin/ryvion-node"
+            })
             .unwrap_or(false),
         log_path: Some(log_path.display().to_string()),
-        install_command: "curl -sSL https://ryvion-hub.fly.dev/install.sh | bash".to_string(),
+        install_command: "curl -sSL https://api.ryvion.ai/install.sh | bash".to_string(),
         start_command: Some("sudo systemctl restart ryvion-node".to_string()),
         log_command: Some("journalctl -u ryvion-node -f".to_string()),
         notes,
@@ -492,26 +554,43 @@ fn probe_linux(api_url: String, host: String, port: u16, api_port_open: bool) ->
 }
 
 #[cfg(target_os = "linux")]
-fn run_linux_runtime_action(action: &str, api_url: &str, hub_url: Option<&str>) -> Result<RuntimeActionResult, String> {
+fn run_linux_runtime_action(
+    action: &str,
+    api_url: &str,
+    hub_url: Option<&str>,
+    repair_command: Option<&str>,
+) -> Result<RuntimeActionResult, String> {
     let (_, port) = parse_host_port(api_url).unwrap_or_else(|| ("127.0.0.1".to_string(), 45890));
     let command = match action {
         "restart" => format!("sudo systemctl restart ryvion-node; echo; curl -fsS http://127.0.0.1:{port}/healthz || true; echo; read -n 1 -s -r -p 'Press any key to close'"),
         "repair" => {
-            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://ryvion-hub.fly.dev");
-            format!("curl -sSL '{}/install.sh' | bash; echo; read -n 1 -s -r -p 'Press any key to close'", hub.trim_end_matches('/'))
+            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://api.ryvion.ai");
+            let script = repair_command
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| {
+                    format!("curl -sSL '{}/install.sh' | bash", hub.trim_end_matches('/'))
+                });
+            format!("{script}; echo; read -n 1 -s -r -p 'Press any key to close'")
         }
         _ => return Err(format!("Unsupported runtime action: {action}")),
     };
     launch_linux_terminal(&command)?;
     Ok(RuntimeActionResult {
         launched: true,
-        message: "Opened a terminal to run the requested runtime action.".to_string(),
+        message: "Opened a terminal to repair or restart the local runtime. Linux runtime repair now applies the published Ryvion runtime kit before refreshing the node service.".to_string(),
     })
 }
 
 #[cfg(target_os = "windows")]
-fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) -> LocalRuntimeProbe {
-    let program_files = env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+fn probe_windows(
+    api_url: String,
+    host: String,
+    port: u16,
+    api_port_open: bool,
+) -> LocalRuntimeProbe {
+    let program_files =
+        env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
     let binary_candidates = vec![format!("{}\\Ryvion\\ryvion-node.exe", program_files)];
     let service_query = command_output("sc.exe", &["query", "RyvionNode"]);
     let service_config = command_output("sc.exe", &["qc", "RyvionNode"]);
@@ -522,8 +601,11 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
     let binary_supports_local_api = binary_paths
         .iter()
         .any(|path| binary_help_contains(path, "-ui-port"));
-    let configured_port = extract_windows_service_ui_port(&service_config)
-        .or_else(|| env::var("RYV_UI_PORT").ok().and_then(|value| value.trim().parse::<u16>().ok()));
+    let configured_port = extract_windows_service_ui_port(&service_config).or_else(|| {
+        env::var("RYV_UI_PORT")
+            .ok()
+            .and_then(|value| value.trim().parse::<u16>().ok())
+    });
     let configured_api_url = configured_port.map(loopback_api_url);
     let configured_api_port_open = configured_port
         .map(|configured| tcp_open("127.0.0.1", configured))
@@ -533,8 +615,12 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
         .as_ref()
         .map(|configured| normalize_api_url(configured) != normalize_api_url(&api_url))
         .unwrap_or(false);
-    let suggested_api_url = configured_api_url.clone().unwrap_or_else(|| loopback_api_url(port));
-    let log_path = env::var("USERPROFILE").ok().map(|v| format!("{}\\.ryvion\\node.log", v));
+    let suggested_api_url = configured_api_url
+        .clone()
+        .unwrap_or_else(|| loopback_api_url(port));
+    let log_path = env::var("USERPROFILE")
+        .ok()
+        .map(|v| format!("{}\\.ryvion\\node.log", v));
 
     let mut notes = Vec::new();
     if !service_installed {
@@ -550,7 +636,10 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
         notes.push("The installed ryvion-node binary predates local operator API support. Reinstall or update the node runtime.".to_string());
     }
     if service_running && !api_port_open {
-        notes.push("The Windows service is running, but the local operator API port is not reachable.".to_string());
+        notes.push(
+            "The Windows service is running, but the local operator API port is not reachable."
+                .to_string(),
+        );
     }
     if api_url_mismatch {
         notes.push(format!(
@@ -578,7 +667,7 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
         managed_binary_path,
         service_uses_managed_binary: true,
         log_path,
-        install_command: "iex ((New-Object System.Net.WebClient).DownloadString('https://ryvion-hub.fly.dev/install.ps1'))".to_string(),
+        install_command: "iex ((New-Object System.Net.WebClient).DownloadString('https://api.ryvion.ai/install.ps1'))".to_string(),
         start_command: Some("Start-Service RyvionNode".to_string()),
         log_command: Some("Get-Content $env:USERPROFILE\\.ryvion\\node.log -Wait".to_string()),
         notes,
@@ -586,12 +675,26 @@ fn probe_windows(api_url: String, host: String, port: u16, api_port_open: bool) 
 }
 
 #[cfg(target_os = "windows")]
-fn run_windows_runtime_action(action: &str, hub_url: Option<&str>) -> Result<RuntimeActionResult, String> {
+fn run_windows_runtime_action(
+    action: &str,
+    hub_url: Option<&str>,
+    repair_command: Option<&str>,
+) -> Result<RuntimeActionResult, String> {
     let command = match action {
         "restart" => "Start-Service RyvionNode".to_string(),
         "repair" => {
-            let hub = hub_url.filter(|v| !v.trim().is_empty()).unwrap_or("https://ryvion-hub.fly.dev");
-            format!("iex ((New-Object System.Net.WebClient).DownloadString('{}/install.ps1'))", hub.trim_end_matches('/'))
+            let hub = hub_url
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or("https://api.ryvion.ai");
+            repair_command
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "iex ((New-Object System.Net.WebClient).DownloadString('{}/install.ps1'))",
+                        hub.trim_end_matches('/')
+                    )
+                })
         }
         _ => return Err(format!("Unsupported runtime action: {action}")),
     };
@@ -608,7 +711,7 @@ fn run_windows_runtime_action(action: &str, hub_url: Option<&str>) -> Result<Run
     }
     Ok(RuntimeActionResult {
         launched: true,
-        message: "Opened an elevated PowerShell window to run the requested runtime action.".to_string(),
+        message: "Opened an elevated PowerShell window to repair or restart the local runtime. Windows runtime repair now applies the published Ryvion runtime kit before returning to the node service.".to_string(),
     })
 }
 
@@ -712,7 +815,9 @@ fn normalize_api_url(value: &str) -> String {
 fn tcp_open(host: &str, port: u16) -> bool {
     let address = format!("{}:{}", host, port);
     match address.to_socket_addrs() {
-        Ok(mut addrs) => addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()),
+        Ok(mut addrs) => {
+            addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok())
+        }
         Err(_) => false,
     }
 }
@@ -810,7 +915,11 @@ fn extract_plist_program_path(contents: &str) -> Option<String> {
     let rest = &contents[start + marker.len()..];
     let value_start = rest.find("<string>")?;
     let value_end = rest[value_start + 8..].find("</string>")?;
-    Some(rest[value_start + 8..value_start + 8 + value_end].trim().to_string())
+    Some(
+        rest[value_start + 8..value_start + 8 + value_end]
+            .trim()
+            .to_string(),
+    )
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -860,9 +969,11 @@ fn extract_plist_ui_port(contents: &str) -> Option<u16> {
 
 #[cfg(any(target_os = "linux", test))]
 fn extract_systemd_exec_start_command(contents: &str) -> Option<String> {
-    contents
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("ExecStart=").map(|value| value.trim().to_string()))
+    contents.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("ExecStart=")
+            .map(|value| value.trim().to_string())
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -894,7 +1005,10 @@ fn extract_windows_service_ui_port(contents: &str) -> Option<u16> {
     contents
         .lines()
         .find(|line| line.contains("BINARY_PATH_NAME"))
-        .and_then(|line| line.split_once(':').map(|(_, value)| value.trim().to_string()))
+        .and_then(|line| {
+            line.split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+        })
         .map(|value| split_command_tokens(&value))
         .as_ref()
         .and_then(|tokens| find_flag_value_in_tokens(tokens, "-ui-port"))
@@ -1015,8 +1129,16 @@ SERVICE_NAME: RyvionNode
 
     #[test]
     fn splits_quoted_command_tokens() {
-        let tokens = split_command_tokens(r#""C:\Program Files\Ryvion\ryvion-node.exe" -ui-port 45890"#);
-        assert_eq!(tokens, vec![r#"C:\Program Files\Ryvion\ryvion-node.exe"#, "-ui-port", "45890"]);
+        let tokens =
+            split_command_tokens(r#""C:\Program Files\Ryvion\ryvion-node.exe" -ui-port 45890"#);
+        assert_eq!(
+            tokens,
+            vec![
+                r#"C:\Program Files\Ryvion\ryvion-node.exe"#,
+                "-ui-port",
+                "45890"
+            ]
+        );
     }
 
     #[test]
@@ -1076,7 +1198,10 @@ SERVICE_NAME: RyvionNode
                         "200 OK",
                         r#"{"version":"v1.2.25","runtime":{"local_api_url":"http://127.0.0.1:45890"}}"#,
                     ),
-                    "/api/v1/operator/jobs" => ("200 OK", r#"{"jobs":[{"job_id":"job_123","status":"done"}]}"#),
+                    "/api/v1/operator/jobs" => (
+                        "200 OK",
+                        r#"{"jobs":[{"job_id":"job_123","status":"done"}]}"#,
+                    ),
                     "/api/v1/operator/logs?limit=200" => ("200 OK", r#"{"lines":["ok"]}"#),
                     _ => ("404 Not Found", r#"{"error":"not_found"}"#),
                 };
@@ -1098,7 +1223,8 @@ SERVICE_NAME: RyvionNode
             .expect("build reqwest client");
         let base_url = format!("http://{}", addr);
         let (status, jobs, logs, diagnostics) =
-            fetch_runtime_snapshot_for_candidate(&client, &base_url).expect("fetch runtime snapshot");
+            fetch_runtime_snapshot_for_candidate(&client, &base_url)
+                .expect("fetch runtime snapshot");
 
         assert_eq!(status["version"], "v1.2.25");
         assert_eq!(jobs["jobs"][0]["job_id"], "job_123");
