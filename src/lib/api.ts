@@ -62,6 +62,9 @@ export interface OperatorStatusResponse {
     native_inference_supported: boolean
     native_inference_ready: boolean
     public_inference_ready: boolean
+    sovereign_review_ready: boolean
+    sovereign_status?: string
+    sovereign_detail?: string
     native_model?: string
     disk_gb?: number
   }
@@ -403,6 +406,13 @@ export function setPublicAIPreference(enabled: boolean, baseUrl = getStoredLocal
   return request<OperatorStatusResponse>(baseUrl, '/api/v1/operator/preferences/public-ai', {
     method: 'POST',
     body: JSON.stringify({ enabled }),
+  })
+}
+
+export function setDeclaredCountryPreference(country: string, baseUrl = getStoredLocalAPIUrl()) {
+  return request<OperatorStatusResponse>(baseUrl, '/api/v1/operator/preferences/declared-country', {
+    method: 'POST',
+    body: JSON.stringify({ country }),
   })
 }
 

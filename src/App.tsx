@@ -22,6 +22,7 @@ import {
   type LocalRuntimeProbeResponse,
   type OperatorDiagnosticsResponse,
   savePayoutPreference,
+  setDeclaredCountryPreference,
   setPublicAIPreference,
   signup,
   type OperatorJob,
@@ -117,6 +118,7 @@ function App() {
   const [runtimeAttempts, setRuntimeAttempts] = useState<LocalRuntimeAttempt[]>([])
   const [runtimeActionBusy, setRuntimeActionBusy] = useState<'restart' | 'repair' | null>(null)
   const [publicParticipationBusy, setPublicParticipationBusy] = useState(false)
+  const [declaredCountryBusy, setDeclaredCountryBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
@@ -367,7 +369,6 @@ function App() {
     const runtime = status?.runtime
     const machine = status?.machine
     if (!runtime || !machine) return []
-    const declaredCountry = Boolean(status?.declared_country)
     const gpuModel = stringsPresent(machine.gpu_model)
     const vramGB = bytesToGB(machine.vram_bytes)
     const ramGB = bytesToGB(machine.ram_bytes)
@@ -422,16 +423,17 @@ function App() {
       },
       {
         name: 'Sovereign pool',
-        ready: Boolean(declaredCountry && status?.registered),
-        reason: status?.declared_country
-          ? 'Declared country is present. Final eligibility remains policy-controlled by the hub.'
-          : 'Declare country and clear policy review before sovereign workloads become eligible.',
+        ready: runtime.sovereign_review_ready,
+        reason: runtime.sovereign_detail || 'Local sovereign prerequisites are incomplete.',
         requirements: ['Declared country', 'Registered node', 'Policy approval on the hub'],
         blockers: [
-          ...(declaredCountry ? [] : ['Declared country is missing']),
-          ...(status?.registered ? [] : ['Node is not registered on the control plane']),
+          ...(runtime.sovereign_status === 'country_missing' ? ['Declared country is missing'] : []),
+          ...(runtime.sovereign_status === 'registration_pending' ? ['Node is not registered on the control plane'] : []),
+          ...(runtime.sovereign_status === 'runtime_unavailable' ? ['No healthy execution path is available locally'] : []),
         ],
-        recommended: 'Use a stable non-proxy network and declare country before pursuing sovereign routing.',
+        recommended: runtime.sovereign_review_ready
+          ? 'Local posture is ready. Keep a stable network and work through hub trust review for sovereign lanes.'
+          : 'Use a stable non-proxy network, declare country, and keep at least one execution path healthy before pursuing sovereign routing.',
       },
     ]
   }, [status])
@@ -585,6 +587,26 @@ function App() {
     }
   }, [localApiUrl, refreshLocal])
 
+  const handleDeclaredCountryChange = useCallback(async (country: string) => {
+    setDeclaredCountryBusy(true)
+    setActionError('')
+    try {
+      const nextStatus = await setDeclaredCountryPreference(country.trim().toUpperCase(), localApiUrl)
+      nextStatus.metrics = normalizeMetrics(nextStatus.metrics)
+      setStatus(nextStatus)
+      setActionMessage(
+        country.trim()
+          ? 'Saved declared country locally. Restart or reinstall the node when you want the control plane to re-register this jurisdiction.'
+          : 'Cleared the declared country locally. Restart or reinstall the node to remove it from the next registration.',
+      )
+      void refreshLocal()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to update declared country')
+    } finally {
+      setDeclaredCountryBusy(false)
+    }
+  }, [localApiUrl, refreshLocal])
+
   const handleRefreshConnectStatus = useCallback(async () => {
     if (!connectAccountId) return
     setActionError('')
@@ -636,7 +658,7 @@ function App() {
           <StatusPill tone={runtimeHealth === 'healthy' ? 'good' : runtimeHealth === 'degraded' ? 'warn' : 'neutral'}>
             {runtimeHealth === 'healthy' ? 'Node ready' : runtimeHealth === 'degraded' ? 'Node degraded' : 'Waiting for node'}
           </StatusPill>
-          <p>{status?.public_key_hex ? shortHash(status.public_key_hex, 8) : 'Local node API not connected yet.'}</p>
+          <p>{status?.public_key_hex ? `Node ${shortHash(status.public_key_hex, 8)}` : 'Local node API not connected yet.'}</p>
         </div>
       </aside>
 
@@ -788,10 +810,12 @@ function App() {
             runtimeProbe={runtimeProbe}
             downloadInfo={downloadInfo}
             publicParticipationBusy={publicParticipationBusy}
+            declaredCountryBusy={declaredCountryBusy}
             onThemeChange={setTheme}
             onLocalApiUrlChange={setLocalApiUrl}
             onHubUrlChange={setHubUrl}
             onPublicParticipationChange={handlePublicParticipationChange}
+            onDeclaredCountryChange={handleDeclaredCountryChange}
             onOpenExternal={openExternal}
           />
         ) : null}
@@ -828,6 +852,8 @@ function OverviewView({
       ? 'Explicitly enabled for buyer-facing AI jobs.'
       : 'Explicitly enabled. Waiting on runtime eligibility before buyer-facing AI jobs can land.'
     : 'Private by default. Opt in from Settings to expose buyer-facing AI jobs.'
+  const sovereignLaneLabel = status.runtime.sovereign_review_ready ? 'Review ready' : 'Blocked'
+  const sovereignLaneDetail = status.runtime.sovereign_detail || 'Declare country and keep at least one execution path healthy before sovereign review can begin.'
   return (
     <div className="view-grid">
       <section className="metric-grid metric-grid--four">
@@ -849,10 +875,18 @@ function OverviewView({
         </div>
         <dl className="definition-list">
           <div>
-            <dt>Public key</dt>
+            <dt>Node identity</dt>
             <dd>
-              {shortHash(status.public_key_hex, 10)}{' '}
-              <button className="text-button" onClick={() => void onCopy(status.public_key_hex, 'Copied node public key.')}>Copy</button>
+              {shortHash(status.public_key_hex, 12)}{' '}
+              <button className="text-button" onClick={() => void onCopy(status.public_key_hex, 'Copied node identity.')}>Copy</button>
+              <p className="support-copy">Stable across reinstall while the local node key is preserved.</p>
+            </dd>
+          </div>
+          <div>
+            <dt>Sovereign lane</dt>
+            <dd>
+              {sovereignLaneLabel}
+              <p className="support-copy">{sovereignLaneDetail}</p>
             </dd>
           </div>
           <div>
@@ -871,6 +905,7 @@ function OverviewView({
         <div className="runtime-checks">
           <CheckRow label="Execution runtime" state={status.runtime.runtime_ready} detail={status.runtime.runtime_health || 'No runtime health reported'} />
           <CheckRow label="Runtime GPU path" state={status.runtime.runtime_gpu_ready || status.runtime.gpu_ready} />
+          <CheckRow label="Sovereign review" state={status.runtime.sovereign_review_ready} detail={sovereignLaneDetail} />
           <CheckRow label="Public participation" state={publicParticipation} detail={publicParticipationDetail} />
           <CheckRow label="Native inference" state={status.runtime.native_inference_ready} detail={status.runtime.native_model || 'No native model loaded'} />
         </div>
@@ -1435,7 +1470,7 @@ function DiagnosticsView({
           <div><dt>Native model</dt><dd>{status?.runtime.native_model || 'Not loaded'}</dd></div>
         </dl>
         <div className="inline-actions">
-          {status ? <button className="ghost-button" onClick={() => onCopy(status.public_key_hex, 'Copied node public key.')}>Copy public key</button> : null}
+          {status ? <button className="ghost-button" onClick={() => onCopy(status.public_key_hex, 'Copied node identity.')}>Copy node identity</button> : null}
           {diagnostics ? <button className="ghost-button" onClick={() => onCopy(JSON.stringify(diagnostics, null, 2), 'Copied diagnostics snapshot.')}>Copy diagnostics JSON</button> : null}
           <button className="ghost-button" onClick={() => onCopy(logs.join('\n'), 'Copied log tail.')}>Copy logs</button>
           <button className="ghost-button" onClick={() => void onOpenExternal(`${localApiUrl}/healthz`)}>Open local health</button>
@@ -1806,10 +1841,12 @@ function SettingsView({
   runtimeProbe,
   downloadInfo,
   publicParticipationBusy,
+  declaredCountryBusy,
   onThemeChange,
   onLocalApiUrlChange,
   onHubUrlChange,
   onPublicParticipationChange,
+  onDeclaredCountryChange,
   onOpenExternal,
 }: {
   status: OperatorStatusResponse | null
@@ -1820,10 +1857,12 @@ function SettingsView({
   runtimeProbe: LocalRuntimeProbeResponse | null
   downloadInfo: DownloadInfo | null
   publicParticipationBusy: boolean
+  declaredCountryBusy: boolean
   onThemeChange: (theme: ThemeMode) => void
   onLocalApiUrlChange: (value: string) => void
   onHubUrlChange: (value: string) => void
   onPublicParticipationChange: (enabled: boolean) => void
+  onDeclaredCountryChange: (country: string) => void
   onOpenExternal: (url: string) => void
 }) {
   const publicParticipation = status?.runtime.public_ai_opt_in ?? status?.runtime.public_ai_ready ?? false
@@ -1836,6 +1875,11 @@ function SettingsView({
   const runtimeArtifact = status?.runtime.runtime_artifact || runtimePlatform?.artifact.file_name || 'Not published'
   const runtimeBinary = status?.runtime.runtime_binary || 'Unknown'
   const runtimeBackend = status?.runtime.runtime_backend || status?.runtime.runtime_provider || 'Unknown'
+  const [declaredCountryInput, setDeclaredCountryInput] = useState(declaredCountry || '')
+
+  useEffect(() => {
+    setDeclaredCountryInput(declaredCountry || '')
+  }, [declaredCountry])
 
   return (
     <div className="view-grid">
@@ -1915,7 +1959,25 @@ function SettingsView({
           <span>Hub URL</span>
           <input value={hubUrl} onChange={(event) => onHubUrlChange(event.target.value)} />
         </label>
-        <p className="support-copy">Declared country from the node: {declaredCountry || 'Not declared'}</p>
+        <label>
+          <span>Declared country (ISO alpha-2)</span>
+          <input
+            value={declaredCountryInput}
+            onChange={(event) => setDeclaredCountryInput(event.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2))}
+            placeholder="CA"
+          />
+        </label>
+        <div className="inline-actions">
+          <button className="ghost-button" onClick={() => onDeclaredCountryChange(declaredCountryInput)} disabled={declaredCountryBusy}>
+            {declaredCountryBusy ? 'Saving…' : 'Save declared country'}
+          </button>
+          <button className="ghost-button" onClick={() => setDeclaredCountryInput('')} disabled={declaredCountryBusy || !declaredCountryInput}>
+            Clear
+          </button>
+        </div>
+        <p className="support-copy">
+          Current local value: {declaredCountry || 'Not declared'}. Saving here updates the node config; restart or reinstall the node when you want the control plane to re-register the jurisdiction.
+        </p>
         {runtimePlatform ? (
           <div className="top-gap">
             <p className="support-copy">
