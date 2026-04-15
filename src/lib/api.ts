@@ -43,7 +43,10 @@ export interface OperatorStatusResponse {
     status_message?: string
     runtime_ready: boolean
     runtime_gpu_ready: boolean
+    runtime_warming: boolean
     runtime_health?: string
+    runtime_posture?: string
+    runtime_detail?: string
     runtime_version?: string
     runtime_channel?: string
     runtime_provider?: string

@@ -319,6 +319,7 @@ function App() {
   const runtimeAlerts = useMemo<Array<{ tone: NoticeTone; title: string; message: string }>>(() => {
     if (!status) return []
     const alerts: Array<{ tone: NoticeTone; title: string; message: string }> = []
+    const runtimePosture = describeRuntimePosture(status.runtime)
     if (runtimeVersionInfo.manualBuild) {
       alerts.push({
         tone: 'neutral',
@@ -348,7 +349,13 @@ function App() {
         message: status.last_heartbeat_error,
       })
     }
-    if (!status.runtime.runtime_ready) {
+    if (runtimePosture.posture === 'warming') {
+      alerts.push({
+        tone: 'neutral',
+        title: 'Execution runtime warming',
+        message: runtimePosture.detail,
+      })
+    } else if (!status.runtime.runtime_ready) {
       alerts.push({
         tone: 'neutral',
         title: 'Container workloads unavailable',
@@ -369,6 +376,7 @@ function App() {
     const runtime = status?.runtime
     const machine = status?.machine
     if (!runtime || !machine) return []
+    const runtimePosture = describeRuntimePosture(runtime)
     const gpuModel = stringsPresent(machine.gpu_model)
     const vramGB = bytesToGB(machine.vram_bytes)
     const ramGB = bytesToGB(machine.ram_bytes)
@@ -380,34 +388,54 @@ function App() {
           ? 'Native inference runtime is healthy.'
           : runtime.runtime_ready
             ? 'Execution runtime is ready for gateway-backed jobs.'
-            : 'Requires a healthy native runtime or managed OCI runtime.',
+            : runtimePosture.posture === 'warming'
+              ? 'Execution runtime is still warming in the background.'
+              : 'Requires a healthy native runtime or managed OCI runtime.',
         requirements: ['Native model or execution runtime', 'Stable CPU/RAM headroom'],
         blockers: [
-          ...(runtime.native_inference_ready || runtime.runtime_ready ? [] : ['Neither native inference nor the managed runtime is ready']),
+          ...(runtime.native_inference_ready || runtime.runtime_ready
+            ? []
+            : [runtimePosture.posture === 'warming' ? 'Managed OCI runtime is still warming in background' : 'Neither native inference nor the managed runtime is ready']),
         ],
-        recommended: runtime.native_inference_ready ? 'Keep the native model loaded for the lowest-latency gateway path.' : 'Bring the managed runtime or the native model path online.',
+        recommended: runtime.native_inference_ready
+          ? 'Keep the native model loaded for the lowest-latency gateway path.'
+          : runtimePosture.posture === 'warming'
+            ? 'Leave the node online until runtime readiness turns green, then gateway-backed OCI jobs can land without repair.'
+            : 'Bring the managed runtime or the native model path online.',
       },
       {
         name: 'Embeddings pipeline',
         ready: runtime.native_inference_ready || runtime.runtime_ready,
-        reason: 'Runs through either the native model or the container path.',
+        reason: runtimePosture.posture === 'warming' && !runtime.native_inference_ready
+          ? 'Managed OCI path is still warming; native embeddings remain available only if the local model is healthy.'
+          : 'Runs through either the native model or the container path.',
         requirements: ['Native model or execution runtime', 'At least 8 GB system RAM'],
         blockers: [
-          ...(runtime.native_inference_ready || runtime.runtime_ready ? [] : ['No eligible execution path is ready']),
+          ...(runtime.native_inference_ready || runtime.runtime_ready
+            ? []
+            : [runtimePosture.posture === 'warming' ? 'Managed OCI runtime is still warming in background' : 'No eligible execution path is ready']),
           ...(ramGB >= 8 ? [] : ['System RAM below the practical embeddings floor']),
         ],
-        recommended: 'Embeddings remain more stable when the execution runtime is healthy and system memory is not saturated.',
+        recommended: runtimePosture.posture === 'warming' && !runtime.native_inference_ready
+          ? 'Keep the node online while Podman completes first-run startup, or load the native model path for immediate embeddings readiness.'
+          : 'Embeddings remain more stable when the execution runtime is healthy and system memory is not saturated.',
       },
       {
         name: 'Video transcode',
         ready: runtime.runtime_ready,
-        reason: runtime.runtime_ready ? 'The managed runtime is available for FFmpeg workloads.' : 'Requires managed OCI runtime availability.',
+        reason: runtime.runtime_ready
+          ? 'The managed runtime is available for FFmpeg workloads.'
+          : runtimePosture.posture === 'warming'
+            ? 'Managed OCI runtime is installed and still finishing startup for FFmpeg workloads.'
+            : 'Requires managed OCI runtime availability.',
         requirements: ['Execution runtime', 'At least 8 GB free disk or scratch space'],
         blockers: [
-          ...(runtime.runtime_ready ? [] : ['Execution runtime is not reachable']),
+          ...(runtime.runtime_ready ? [] : [runtimePosture.posture === 'warming' ? 'Execution runtime is still warming in background' : 'Execution runtime is not reachable']),
           ...((runtime.disk_gb ?? 0) >= 8 ? [] : ['Less than 8 GB scratch capacity reported by health checks']),
         ],
-        recommended: 'Keep the execution runtime healthy before login so transcode jobs can land immediately after heartbeat.',
+        recommended: runtimePosture.posture === 'warming'
+          ? 'Give the managed runtime another minute to finish first-run startup, then refresh status instead of rerunning repair immediately.'
+          : 'Keep the execution runtime healthy before login so transcode jobs can land immediately after heartbeat.',
       },
       {
         name: 'Spatial stages',
@@ -429,10 +457,13 @@ function App() {
         blockers: [
           ...(runtime.sovereign_status === 'country_missing' ? ['Declared country is missing'] : []),
           ...(runtime.sovereign_status === 'registration_pending' ? ['Node is not registered on the control plane'] : []),
+          ...(runtime.sovereign_status === 'runtime_warming' ? ['Managed execution runtime is still warming in background'] : []),
           ...(runtime.sovereign_status === 'runtime_unavailable' ? ['No healthy execution path is available locally'] : []),
         ],
         recommended: runtime.sovereign_review_ready
           ? 'Local posture is ready. Keep a stable network and work through hub trust review for sovereign lanes.'
+          : runtime.sovereign_status === 'runtime_warming'
+            ? 'Keep the node online until runtime readiness turns green, then continue trust review for sovereign lanes.'
           : 'Use a stable non-proxy network, declare country, and keep at least one execution path healthy before pursuing sovereign routing.',
       },
     ]
@@ -846,19 +877,20 @@ function OverviewView({
   onOpenExternal: (url: string) => void
 }) {
   const metrics = status.metrics
+  const runtimePosture = describeRuntimePosture(status.runtime)
   const publicParticipation = status.runtime.public_ai_opt_in ?? status.runtime.public_ai_ready
   const publicParticipationDetail = publicParticipation
     ? status.runtime.public_inference_ready
       ? 'Explicitly enabled for buyer-facing AI jobs.'
       : 'Explicitly enabled. Waiting on runtime eligibility before buyer-facing AI jobs can land.'
     : 'Private by default. Opt in from Settings to expose buyer-facing AI jobs.'
-  const sovereignLaneLabel = status.runtime.sovereign_review_ready ? 'Review ready' : 'Blocked'
+  const sovereignLaneLabel = status.runtime.sovereign_review_ready ? 'Review ready' : status.runtime.sovereign_status === 'runtime_warming' ? 'Warming' : 'Blocked'
   const sovereignLaneDetail = status.runtime.sovereign_detail || 'Declare country and keep at least one execution path healthy before sovereign review can begin.'
   return (
     <div className="view-grid">
       <section className="metric-grid metric-grid--four">
         <MetricCard title="Node state" value={status.registered ? 'Registered' : 'Pending'} detail={status.last_heartbeat_error || status.register_error || 'Control plane reachable.'} />
-        <MetricCard title="Runtime" value={status.runtime.runtime_ready ? 'Ready' : 'Unavailable'} detail={status.runtime.runtime_gpu_ready ? 'GPU runtime enabled.' : 'CPU / general OCI path only.'} />
+        <MetricCard title="Runtime" value={runtimePosture.label} detail={runtimePosture.detail} />
         <MetricCard title="Machine load" value={formatPercent(Math.max(metrics.cpu_util ?? 0, metrics.mem_util ?? 0))} detail={`CPU ${formatPercent(metrics.cpu_util)} · RAM ${formatPercent(metrics.mem_util)} · GPU ${formatPercent(metrics.gpu_util)}`} />
         <MetricCard title="Cloud earnings" value={cloudStats ? formatCurrency(cloudStats.total_earnings_cents) : 'Connect account'} detail={cloudStats ? `${cloudStats.node_count} linked nodes · ${formatCurrency(cloudStats.total_pending_earnings_cents)} pending` : 'Sign in to see operator earnings and claim codes.'} />
       </section>
@@ -903,7 +935,7 @@ function OverviewView({
           </div>
         </dl>
         <div className="runtime-checks">
-          <CheckRow label="Execution runtime" state={status.runtime.runtime_ready} detail={status.runtime.runtime_health || 'No runtime health reported'} />
+          <CheckRow label="Execution runtime" state={status.runtime.runtime_ready} detail={runtimePosture.detail} statusLabel={runtimePosture.checkLabel} tone={runtimePosture.tone} />
           <CheckRow label="Runtime GPU path" state={status.runtime.runtime_gpu_ready || status.runtime.gpu_ready} />
           <CheckRow label="Sovereign review" state={status.runtime.sovereign_review_ready} detail={sovereignLaneDetail} />
           <CheckRow label="Public participation" state={publicParticipation} detail={publicParticipationDetail} />
@@ -1832,6 +1864,46 @@ function resolveRuntimeInstallCommand(downloadInfo: DownloadInfo | null, platfor
   }
 }
 
+function describeRuntimePosture(runtime: OperatorStatusResponse['runtime']) {
+  const posture = (runtime.runtime_posture || runtime.runtime_health || '').trim().toLowerCase()
+  if (runtime.runtime_ready || posture === 'ready') {
+    return {
+      posture: 'ready',
+      label: 'Ready',
+      checkLabel: 'Ready',
+      tone: 'good' as NoticeTone,
+      detail: runtime.runtime_gpu_ready
+        ? 'Managed OCI runtime is ready with GPU execution available.'
+        : 'Managed OCI runtime is ready for CPU and general OCI workloads.',
+    }
+  }
+  if (runtime.runtime_warming || posture === 'warming') {
+    return {
+      posture: 'warming',
+      label: 'Warming',
+      checkLabel: 'Warming',
+      tone: 'neutral' as NoticeTone,
+      detail: runtime.runtime_detail || 'Managed OCI runtime is installed and still finishing first-run startup in the background.',
+    }
+  }
+  if (posture === 'degraded') {
+    return {
+      posture: 'degraded',
+      label: 'Degraded',
+      checkLabel: 'Degraded',
+      tone: 'warn' as NoticeTone,
+      detail: runtime.runtime_detail || 'Managed OCI runtime is installed but not yet healthy for OCI workloads.',
+    }
+  }
+  return {
+    posture: 'unavailable',
+    label: 'Unavailable',
+    checkLabel: 'Waiting',
+    tone: 'neutral' as NoticeTone,
+    detail: runtime.runtime_detail || 'Managed OCI runtime is not available on this machine yet.',
+  }
+}
+
 function SettingsView({
   status,
   theme,
@@ -2057,14 +2129,28 @@ function StatusPill({ children, tone }: { children: string; tone: 'good' | 'warn
   return <span className={`status-pill status-pill--${tone}`}>{children}</span>
 }
 
-function CheckRow({ label, state, detail }: { label: string; state: boolean; detail?: string }) {
+function CheckRow({
+  label,
+  state,
+  detail,
+  statusLabel,
+  tone,
+}: {
+  label: string
+  state: boolean
+  detail?: string
+  statusLabel?: string
+  tone?: NoticeTone
+}) {
+  const resolvedTone = tone ?? (state ? 'good' : 'neutral')
+  const resolvedLabel = statusLabel ?? (state ? 'Ready' : 'Waiting')
   return (
     <div className="check-row">
       <div>
         <strong>{label}</strong>
         {detail ? <p>{detail}</p> : null}
       </div>
-      <StatusPill tone={state ? 'good' : 'neutral'}>{state ? 'Ready' : 'Waiting'}</StatusPill>
+      <StatusPill tone={resolvedTone}>{resolvedLabel}</StatusPill>
     </div>
   )
 }
@@ -2183,6 +2269,7 @@ function buildDoctorFindings({
   runtimeVersionInfo: RuntimeVersionInfo
 }): DoctorFinding[] {
   const findings: DoctorFinding[] = []
+  const runtimePosture = status ? describeRuntimePosture(status.runtime) : null
 
   if (!status && localError) {
     findings.push({
@@ -2284,7 +2371,16 @@ function buildDoctorFindings({
     })
   }
 
-  if (status && !status.runtime.runtime_ready) {
+  if (status && runtimePosture?.posture === 'warming') {
+    findings.push({
+      key: 'runtime-warming',
+      title: 'Execution runtime is still warming',
+      severity: 'low',
+      summary: runtimePosture.detail,
+      detail: 'This is expected after first install on Windows while Podman completes machine setup in the background.',
+      actions: ['copy-log-command', 'refresh-runtime'],
+    })
+  } else if (status && !status.runtime.runtime_ready) {
     findings.push({
       key: 'runtime-unavailable',
       title: 'Execution runtime is not reachable',
