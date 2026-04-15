@@ -52,6 +52,8 @@ export interface OperatorStatusResponse {
     runtime_artifact?: string
     runtime_binary?: string
     runtime_backend?: string
+    runtime_engine?: string
+    runtime_engine_kind?: string
     runtime_backend_present: boolean
     runtime_manifest_hash?: string
     managed_oci_gpu_ready: boolean

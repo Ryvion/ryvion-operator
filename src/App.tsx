@@ -1875,6 +1875,8 @@ function SettingsView({
   const runtimeArtifact = status?.runtime.runtime_artifact || runtimePlatform?.artifact.file_name || 'Not published'
   const runtimeBinary = status?.runtime.runtime_binary || 'Unknown'
   const runtimeBackend = status?.runtime.runtime_backend || status?.runtime.runtime_provider || 'Unknown'
+  const runtimeEngine = status?.runtime.runtime_engine || 'Unknown'
+  const runtimeEngineKind = status?.runtime.runtime_engine_kind || 'unreported'
   const [declaredCountryInput, setDeclaredCountryInput] = useState(declaredCountry || '')
 
   useEffect(() => {
@@ -1988,6 +1990,9 @@ function SettingsView({
             </p>
             <p className="support-copy">
               Wrapper {runtimeBinary} · Backend {runtimeBackend}
+            </p>
+            <p className="support-copy">
+              OCI engine {runtimeEngineKind} · Binary {runtimeEngine}
             </p>
             <div className="inline-actions top-gap">
               <button className="ghost-button" onClick={() => void onOpenExternal(runtimePlatform.artifact.url)}>
