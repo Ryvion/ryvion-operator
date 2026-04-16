@@ -362,11 +362,11 @@ function App() {
         message: 'The managed execution runtime is not ready, so media, embedding, agent hosting, and other OCI workloads cannot land on this node.',
       })
     }
-    if (!status.declared_country) {
+    if (!status.verified_country && !status.declared_country) {
       alerts.push({
         tone: 'neutral',
-        title: 'Declared country missing',
-        message: 'Country-restricted policy paths require a declared country and higher-trust posture on the control plane.',
+        title: 'Country not verified yet',
+        message: 'Country-restricted policy paths require a hub-verified country or a declared fallback while verification catches up.',
       })
     }
     return alerts.slice(0, 4)
@@ -453,9 +453,11 @@ function App() {
         name: 'Sovereign pool',
         ready: runtime.sovereign_review_ready,
         reason: runtime.sovereign_detail || 'Local sovereign prerequisites are incomplete.',
-        requirements: ['Declared country', 'Registered node', 'Policy approval on the hub'],
+        requirements: ['Hub-verified country (or declared fallback)', 'Registered node', 'Policy approval on the hub'],
         blockers: [
-          ...(runtime.sovereign_status === 'country_missing' ? ['Declared country is missing'] : []),
+          ...(runtime.sovereign_status === 'country_missing' ? ['Country has not been verified by the hub yet'] : []),
+          ...(runtime.sovereign_status === 'country_mismatch' ? ['Declared country does not match hub-verified country'] : []),
+          ...(runtime.sovereign_status === 'trust_review_pending' ? ['Hub trust review has not granted sovereign approval yet'] : []),
           ...(runtime.sovereign_status === 'registration_pending' ? ['Node is not registered on the control plane'] : []),
           ...(runtime.sovereign_status === 'runtime_warming' ? ['Managed execution runtime is still warming in background'] : []),
           ...(runtime.sovereign_status === 'runtime_unavailable' ? ['No healthy execution path is available locally'] : []),
@@ -464,7 +466,9 @@ function App() {
           ? 'Local posture is ready. Keep a stable network and work through hub trust review for sovereign lanes.'
           : runtime.sovereign_status === 'runtime_warming'
             ? 'Keep the node online until runtime readiness turns green, then continue trust review for sovereign lanes.'
-          : 'Use a stable non-proxy network, declare country, and keep at least one execution path healthy before pursuing sovereign routing.',
+          : runtime.sovereign_status === 'country_mismatch'
+            ? 'Correct the declared country or clear it so the node follows the hub-verified location instead of conflicting with it.'
+          : 'Use a stable non-proxy network, let the hub verify the machine location, and keep at least one execution path healthy before pursuing sovereign routing.',
       },
     ]
   }, [status])
@@ -924,6 +928,10 @@ function OverviewView({
           <div>
             <dt>Declared country</dt>
             <dd>{status.declared_country || 'Not declared'}</dd>
+          </div>
+          <div>
+            <dt>Verified country</dt>
+            <dd>{status.verified_country || status.runtime.verified_country || 'Pending hub verification'}</dd>
           </div>
           <div>
             <dt>Latest heartbeat</dt>
@@ -2391,13 +2399,13 @@ function buildDoctorFindings({
     })
   }
 
-  if (status && !status.declared_country) {
+  if (status && !status.verified_country && !status.declared_country) {
     findings.push({
       key: 'declared-country-missing',
-      title: 'Declared country is missing',
+      title: 'Country is not verified yet',
       severity: 'low',
-      summary: 'Country-restricted and sovereign routing paths need a declared country on the node runtime.',
-      detail: 'Open Settings and set the declared country before pursuing higher-trust workload pools.',
+      summary: 'Country-restricted and sovereign routing paths need hub verification or a declared fallback.',
+      detail: 'Leave the node online for hub verification, or open Settings and set a temporary ISO country code fallback if you need the local posture hint immediately.',
       actions: [],
     })
   }

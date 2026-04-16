@@ -27,6 +27,7 @@ export interface OperatorStatusResponse {
   public_key_hex: string
   device_type: string
   declared_country?: string
+  verified_country?: string
   registered: boolean
   register_error?: string
   latest_version?: string
@@ -70,6 +71,11 @@ export interface OperatorStatusResponse {
     sovereign_review_ready: boolean
     sovereign_status?: string
     sovereign_detail?: string
+    verified_country?: string
+    location_approved?: boolean
+    sovereign_verified?: boolean
+    verification_source?: string
+    trust_reason?: string
     native_model?: string
     disk_gb?: number
   }
@@ -99,6 +105,7 @@ export interface OperatorDiagnosticsResponse {
   latest_version?: string
   local_api_url: string
   declared_country?: string
+  verified_country?: string
   runtime_checks: Array<{
     key: string
     label: string
