@@ -885,9 +885,9 @@ function OverviewView({
   const publicParticipation = status.runtime.public_ai_opt_in ?? status.runtime.public_ai_ready
   const publicParticipationDetail = publicParticipation
     ? status.runtime.public_inference_ready
-      ? 'Explicitly enabled for buyer-facing AI jobs.'
-      : 'Explicitly enabled. Waiting on runtime eligibility before buyer-facing AI jobs can land.'
-    : 'Private by default. Opt in from Settings to expose buyer-facing AI jobs.'
+      ? 'Available for paid buyer-facing AI jobs.'
+      : 'Participation is enabled. Waiting on runtime eligibility before buyer-facing AI jobs can land.'
+    : 'Private mode is enabled. Paid buyer-facing AI jobs will not land here.'
   const sovereignLaneLabel = status.runtime.sovereign_review_ready ? 'Review ready' : status.runtime.sovereign_status === 'runtime_warming' ? 'Warming' : 'Blocked'
   const sovereignLaneDetail = status.runtime.sovereign_detail || 'Declare country and keep at least one execution path healthy before sovereign review can begin.'
   return (
@@ -1990,7 +1990,7 @@ function SettingsView({
           <StatusPill tone={publicParticipation ? 'good' : 'neutral'}>{publicParticipationLabel}</StatusPill>
         </div>
         <p className="support-copy">
-          Public participation is off by default. Enable it only on machines you explicitly want exposed to buyer-facing AI jobs and sovereign routing review.
+          Ryvion nodes participate in paid buyer-facing inference by default. Switch to private mode only when you want this machine reserved for local or explicitly assigned work.
         </p>
         <div className="segmented-control top-gap">
           <button
