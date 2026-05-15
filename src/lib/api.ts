@@ -40,6 +40,17 @@ export interface OperatorEnergyPlaneSnapshot {
   detail?: string
 }
 
+export interface OperatorEnergyPolicy {
+  max_wattage?: number
+  min_payout_per_kwh_usd?: number
+  quiet_hours_start?: string
+  quiet_hours_end?: string
+  batch_only_during_quiet_hours?: boolean
+  green_mode?: boolean
+  energy_shiftable_batch_opt_in?: boolean
+  prefer_energy_efficient_roles?: boolean
+}
+
 export interface OperatorStatusResponse {
   version: string
   hub_url: string
@@ -112,6 +123,7 @@ export interface OperatorStatusResponse {
     GPUThrottled?: boolean
   }
   energy_plane?: OperatorEnergyPlaneSnapshot
+  energy_policy?: OperatorEnergyPolicy
   current_job?: OperatorJob
   recent_jobs: OperatorJob[]
   last_claim_at?: string
@@ -445,6 +457,13 @@ export function setDeclaredCountryPreference(country: string, baseUrl = getStore
   return request<OperatorStatusResponse>(baseUrl, '/api/v1/operator/preferences/declared-country', {
     method: 'POST',
     body: JSON.stringify({ country }),
+  })
+}
+
+export function setEnergyPolicyPreference(policy: OperatorEnergyPolicy, baseUrl = getStoredLocalAPIUrl()) {
+  return request<OperatorStatusResponse>(baseUrl, '/api/v1/operator/preferences/energy', {
+    method: 'POST',
+    body: JSON.stringify(policy),
   })
 }
 

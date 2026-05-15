@@ -21,8 +21,10 @@ import {
   type LocalRuntimeAttempt,
   type LocalRuntimeProbeResponse,
   type OperatorDiagnosticsResponse,
+  type OperatorEnergyPolicy,
   savePayoutPreference,
   setDeclaredCountryPreference,
+  setEnergyPolicyPreference,
   setPublicAIPreference,
   signup,
   type OperatorJob,
@@ -119,6 +121,7 @@ function App() {
   const [runtimeActionBusy, setRuntimeActionBusy] = useState<'restart' | 'repair' | null>(null)
   const [publicParticipationBusy, setPublicParticipationBusy] = useState(false)
   const [declaredCountryBusy, setDeclaredCountryBusy] = useState(false)
+  const [energyPolicyBusy, setEnergyPolicyBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
@@ -642,6 +645,22 @@ function App() {
     }
   }, [localApiUrl, refreshLocal])
 
+  const handleEnergyPolicyChange = useCallback(async (policy: OperatorEnergyPolicy) => {
+    setEnergyPolicyBusy(true)
+    setActionError('')
+    try {
+      const nextStatus = await setEnergyPolicyPreference(policy, localApiUrl)
+      nextStatus.metrics = normalizeMetrics(nextStatus.metrics)
+      setStatus(nextStatus)
+      setActionMessage('Saved EnergyPlane policy locally. New WorkGraph admission can use these operator limits once the hub starts requesting energy-aware roles.')
+      void refreshLocal()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to update EnergyPlane policy')
+    } finally {
+      setEnergyPolicyBusy(false)
+    }
+  }, [localApiUrl, refreshLocal])
+
   const handleRefreshConnectStatus = useCallback(async () => {
     if (!connectAccountId) return
     setActionError('')
@@ -846,11 +865,13 @@ function App() {
             downloadInfo={downloadInfo}
             publicParticipationBusy={publicParticipationBusy}
             declaredCountryBusy={declaredCountryBusy}
+            energyPolicyBusy={energyPolicyBusy}
             onThemeChange={setTheme}
             onLocalApiUrlChange={setLocalApiUrl}
             onHubUrlChange={setHubUrl}
             onPublicParticipationChange={handlePublicParticipationChange}
             onDeclaredCountryChange={handleDeclaredCountryChange}
+            onEnergyPolicyChange={handleEnergyPolicyChange}
             onOpenExternal={openExternal}
           />
         ) : null}
@@ -1951,6 +1972,54 @@ function formatEnergySource(value?: string | null) {
   }
 }
 
+type EnergyPolicyForm = {
+  max_wattage: string
+  min_payout_per_kwh_usd: string
+  quiet_hours_start: string
+  quiet_hours_end: string
+  batch_only_during_quiet_hours: boolean
+  green_mode: boolean
+  energy_shiftable_batch_opt_in: boolean
+  prefer_energy_efficient_roles: boolean
+}
+
+function energyPolicyToForm(policy?: OperatorEnergyPolicy): EnergyPolicyForm {
+  return {
+    max_wattage: policy?.max_wattage ? String(policy.max_wattage) : '',
+    min_payout_per_kwh_usd: policy?.min_payout_per_kwh_usd ? String(policy.min_payout_per_kwh_usd) : '',
+    quiet_hours_start: policy?.quiet_hours_start || '',
+    quiet_hours_end: policy?.quiet_hours_end || '',
+    batch_only_during_quiet_hours: !!policy?.batch_only_during_quiet_hours,
+    green_mode: !!policy?.green_mode,
+    energy_shiftable_batch_opt_in: !!policy?.energy_shiftable_batch_opt_in,
+    prefer_energy_efficient_roles: !!policy?.prefer_energy_efficient_roles,
+  }
+}
+
+function formToEnergyPolicy(form: EnergyPolicyForm): OperatorEnergyPolicy {
+  return {
+    max_wattage: parseOptionalNumber(form.max_wattage),
+    min_payout_per_kwh_usd: parseOptionalNumber(form.min_payout_per_kwh_usd),
+    quiet_hours_start: form.quiet_hours_start.trim() || undefined,
+    quiet_hours_end: form.quiet_hours_end.trim() || undefined,
+    batch_only_during_quiet_hours: form.batch_only_during_quiet_hours,
+    green_mode: form.green_mode,
+    energy_shiftable_batch_opt_in: form.energy_shiftable_batch_opt_in,
+    prefer_energy_efficient_roles: form.prefer_energy_efficient_roles,
+  }
+}
+
+function parseOptionalNumber(value: string) {
+  const trimmed = value.trim().replace(',', '.')
+  if (!trimmed) return undefined
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function cleanTimeInput(value: string) {
+  return value.replace(/[^\d:]/g, '').slice(0, 5)
+}
+
 function resolveManagedRuntimePlatform(downloadInfo: DownloadInfo | null, platform?: string | null) {
   if (!downloadInfo?.managed_runtime || !platform) return null
   switch (platform) {
@@ -2031,11 +2100,13 @@ function SettingsView({
   downloadInfo,
   publicParticipationBusy,
   declaredCountryBusy,
+  energyPolicyBusy,
   onThemeChange,
   onLocalApiUrlChange,
   onHubUrlChange,
   onPublicParticipationChange,
   onDeclaredCountryChange,
+  onEnergyPolicyChange,
   onOpenExternal,
 }: {
   status: OperatorStatusResponse | null
@@ -2047,11 +2118,13 @@ function SettingsView({
   downloadInfo: DownloadInfo | null
   publicParticipationBusy: boolean
   declaredCountryBusy: boolean
+  energyPolicyBusy: boolean
   onThemeChange: (theme: ThemeMode) => void
   onLocalApiUrlChange: (value: string) => void
   onHubUrlChange: (value: string) => void
   onPublicParticipationChange: (enabled: boolean) => void
   onDeclaredCountryChange: (country: string) => void
+  onEnergyPolicyChange: (policy: OperatorEnergyPolicy) => void
   onOpenExternal: (url: string) => void
 }) {
   const publicParticipation = status?.runtime.public_ai_opt_in ?? status?.runtime.public_ai_ready ?? false
@@ -2067,10 +2140,23 @@ function SettingsView({
   const runtimeEngine = status?.runtime.runtime_engine || 'Unknown'
   const runtimeEngineKind = status?.runtime.runtime_engine_kind || 'unreported'
   const [declaredCountryInput, setDeclaredCountryInput] = useState(declaredCountry || '')
+  const [energyPolicyForm, setEnergyPolicyForm] = useState(() => energyPolicyToForm(status?.energy_policy))
 
   useEffect(() => {
     setDeclaredCountryInput(declaredCountry || '')
   }, [declaredCountry])
+
+  useEffect(() => {
+    setEnergyPolicyForm(energyPolicyToForm(status?.energy_policy))
+  }, [status?.energy_policy])
+
+  const updateEnergyPolicyField = (field: keyof EnergyPolicyForm, value: string | boolean) => {
+    setEnergyPolicyForm((current) => ({ ...current, [field]: value }))
+  }
+
+  const saveEnergyPolicy = () => {
+    onEnergyPolicyChange(formToEnergyPolicy(energyPolicyForm))
+  }
 
   return (
     <div className="view-grid">
@@ -2121,6 +2207,94 @@ function SettingsView({
           {publicParticipation
             ? 'This preference is stored in the local node config and reflected in health reporting so the control plane can stop treating participation as an environment-only setting.'
             : 'This preference is stored in the local node config so the operator app can keep the node private without any manual environment variable edits.'}
+        </p>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">EnergyPlane</p>
+            <h2>Energy policy</h2>
+          </div>
+          <StatusPill tone={status?.energy_policy ? 'good' : 'neutral'}>{status?.energy_policy ? 'Stored' : 'Default'}</StatusPill>
+        </div>
+        <div className="form-grid">
+          <label>
+            <span>Max wattage</span>
+            <input
+              inputMode="decimal"
+              placeholder="0 = no cap"
+              value={energyPolicyForm.max_wattage}
+              onChange={(event) => updateEnergyPolicyField('max_wattage', event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Min payout per kWh USD</span>
+            <input
+              inputMode="decimal"
+              placeholder="0.00"
+              value={energyPolicyForm.min_payout_per_kwh_usd}
+              onChange={(event) => updateEnergyPolicyField('min_payout_per_kwh_usd', event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Quiet hours start</span>
+            <input
+              placeholder="22:00"
+              value={energyPolicyForm.quiet_hours_start}
+              onChange={(event) => updateEnergyPolicyField('quiet_hours_start', cleanTimeInput(event.target.value))}
+            />
+          </label>
+          <label>
+            <span>Quiet hours end</span>
+            <input
+              placeholder="06:00"
+              value={energyPolicyForm.quiet_hours_end}
+              onChange={(event) => updateEnergyPolicyField('quiet_hours_end', cleanTimeInput(event.target.value))}
+            />
+          </label>
+        </div>
+        <div className="toggle-grid top-gap">
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={energyPolicyForm.batch_only_during_quiet_hours}
+              onChange={(event) => updateEnergyPolicyField('batch_only_during_quiet_hours', event.target.checked)}
+            />
+            <span>Batch only during quiet hours</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={energyPolicyForm.green_mode}
+              onChange={(event) => updateEnergyPolicyField('green_mode', event.target.checked)}
+            />
+            <span>Green mode</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={energyPolicyForm.energy_shiftable_batch_opt_in}
+              onChange={(event) => updateEnergyPolicyField('energy_shiftable_batch_opt_in', event.target.checked)}
+            />
+            <span>Energy-shiftable batch opt-in</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={energyPolicyForm.prefer_energy_efficient_roles}
+              onChange={(event) => updateEnergyPolicyField('prefer_energy_efficient_roles', event.target.checked)}
+            />
+            <span>Prefer energy-efficient roles</span>
+          </label>
+        </div>
+        <div className="inline-actions top-gap">
+          <button className="ghost-button" onClick={saveEnergyPolicy} disabled={energyPolicyBusy}>
+            {energyPolicyBusy ? 'Saving…' : 'Save energy policy'}
+          </button>
+        </div>
+        <p className="support-copy top-gap">
+          These limits are stored locally on the node. They do not mint credits or change real payouts by themselves.
         </p>
       </section>
 
