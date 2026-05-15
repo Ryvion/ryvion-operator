@@ -21,6 +21,25 @@ export interface OperatorJob {
   delivery_object?: string
 }
 
+export interface OperatorEnergyPlaneSnapshot {
+  schema_version: string
+  status: 'unavailable' | 'measuring' | 'measured' | string
+  telemetry_tier?: string
+  telemetry_source?: string
+  last_power_watts?: number
+  sample_count?: number
+  window_started_at?: string
+  last_sample_at?: string
+  integrated_seconds?: number
+  estimated_energy_wh?: number
+  average_power_watts?: number
+  useful_energy_ready: boolean
+  energy_receipt_candidate: boolean
+  accepted_value_required: boolean
+  measurement_window_capped?: boolean
+  detail?: string
+}
+
 export interface OperatorStatusResponse {
   version: string
   hub_url: string
@@ -92,6 +111,7 @@ export interface OperatorStatusResponse {
     PowerWatts?: number
     GPUThrottled?: boolean
   }
+  energy_plane?: OperatorEnergyPlaneSnapshot
   current_job?: OperatorJob
   recent_jobs: OperatorJob[]
   last_claim_at?: string

@@ -1022,6 +1022,8 @@ function OverviewView({
 
 function MachineView({ status, workloadMatrix }: { status: OperatorStatusResponse; workloadMatrix: WorkloadReadiness[] }) {
   const metrics = status.metrics
+  const energyPlane = status.energy_plane
+  const energyPosture = describeEnergyPlane(energyPlane)
   const freeRam = status.machine.ram_bytes ? Math.round(status.machine.ram_bytes * (1 - (metrics.mem_util ?? 0) / 100)) : 0
   const freeVRAM = status.machine.vram_bytes ? Math.round(status.machine.vram_bytes * (1 - (metrics.gpu_util ?? 0) / 100)) : 0
   const cpuHeadroom = Math.max(0, 100 - (metrics.cpu_util ?? 0))
@@ -1032,6 +1034,7 @@ function MachineView({ status, workloadMatrix }: { status: OperatorStatusRespons
         <MetricCard title="System RAM" value={formatBytes(status.machine.ram_bytes)} detail={`Approx. free ${formatBytes(freeRam)}`} />
         <MetricCard title="GPU" value={status.machine.gpu_model || 'CPU node'} detail={status.machine.vram_bytes ? `${formatBytes(status.machine.vram_bytes)} VRAM` : 'No discrete VRAM reported'} />
         <MetricCard title="Disk posture" value={status.runtime.disk_gb ? `${status.runtime.disk_gb} GB` : '—'} detail={status.runtime.status_message || 'Derived from health report tokens.'} />
+        <MetricCard title="EnergyPlane" value={energyPosture.label} detail={energyPosture.detail} />
       </section>
 
       <section className="panel panel-span-2">
@@ -1064,6 +1067,48 @@ function MachineView({ status, workloadMatrix }: { status: OperatorStatusRespons
           <LoadRow label="Memory" value={metrics.mem_util ?? 0} />
           <LoadRow label="GPU" value={metrics.gpu_util ?? 0} />
           <LoadRow label="Power" value={(metrics.power_watts ?? 0) / 5} text={`${(metrics.power_watts ?? 0).toFixed(0)} W`} />
+        </div>
+      </section>
+
+      <section className="panel panel-span-2">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">EnergyPlane</p>
+            <h2>Useful-energy telemetry</h2>
+          </div>
+          <StatusPill tone={energyPosture.tone}>{energyPosture.label}</StatusPill>
+        </div>
+        <div className="capacity-grid">
+          <MiniStat label="Last power" value={formatPowerWatts(energyPlane?.last_power_watts ?? metrics.power_watts)} />
+          <MiniStat label="Integrated energy" value={formatEnergyWh(energyPlane?.estimated_energy_wh)} />
+          <MiniStat label="Average power" value={formatPowerWatts(energyPlane?.average_power_watts)} />
+          <MiniStat label="Sample count" value={energyPlane?.sample_count != null ? String(energyPlane.sample_count) : '—'} />
+          <MiniStat label="Telemetry tier" value={formatEnergyTier(energyPlane?.telemetry_tier)} />
+          <MiniStat label="Source" value={formatEnergySource(energyPlane?.telemetry_source)} />
+          <MiniStat label="Window" value={formatDuration((energyPlane?.integrated_seconds ?? 0) * 1000)} />
+          <MiniStat label="Updated" value={energyPlane?.last_sample_at ? formatRelative(energyPlane.last_sample_at) : '—'} />
+        </div>
+        <div className="runtime-checks top-gap">
+          <CheckRow
+            label="Useful energy"
+            state={!!energyPlane?.useful_energy_ready}
+            statusLabel={energyPlane?.useful_energy_ready ? 'Ready' : energyPlane ? 'Waiting' : 'Not reported'}
+            tone={energyPosture.tone}
+            detail={energyPosture.detail}
+          />
+          <CheckRow
+            label="Energy receipt candidate"
+            state={!!energyPlane?.energy_receipt_candidate}
+            statusLabel={energyPlane?.energy_receipt_candidate ? 'Candidate' : energyPlane ? 'Pending' : 'Not reported'}
+            detail={!energyPlane ? 'Upgrade or restart the local node runtime to expose EnergyPlane status.' : energyPlane.accepted_value_required ? 'Needs accepted work value before the hub can score useful energy.' : 'Energy telemetry is still collecting a usable window.'}
+          />
+          <CheckRow
+            label="Window cap"
+            state={!!energyPlane && !energyPlane.measurement_window_capped}
+            statusLabel={!energyPlane ? 'Not reported' : energyPlane.measurement_window_capped ? 'Capped' : 'Normal'}
+            tone={!energyPlane ? 'neutral' : energyPlane.measurement_window_capped ? 'warn' : 'good'}
+            detail={!energyPlane ? 'No EnergyPlane window has been reported yet.' : energyPlane.measurement_window_capped ? 'The node capped a long measurement gap before integrating energy.' : 'No long telemetry gap is marked on the current snapshot.'}
+          />
         </div>
       </section>
 
@@ -1839,6 +1884,70 @@ function normalizeMetrics(metrics: OperatorStatusResponse['metrics']) {
     gpu_util: metrics.gpu_util ?? metrics.GPUUtil,
     power_watts: metrics.power_watts ?? metrics.PowerWatts,
     gpu_throttled: metrics.gpu_throttled ?? metrics.GPUThrottled,
+  }
+}
+
+function describeEnergyPlane(snapshot?: OperatorStatusResponse['energy_plane']): { label: string; detail: string; tone: NoticeTone } {
+  if (!snapshot) {
+    return {
+      label: 'Not reported',
+      detail: 'The local node runtime has not reported EnergyPlane telemetry yet.',
+      tone: 'neutral',
+    }
+  }
+  if (snapshot.status === 'measured') {
+    return {
+      label: 'Measured',
+      detail: snapshot.detail || 'Power samples are integrated and ready to pair with accepted work value.',
+      tone: 'good',
+    }
+  }
+  if (snapshot.status === 'measuring') {
+    return {
+      label: 'Measuring',
+      detail: snapshot.detail || 'The node has power samples but needs a positive measurement window before useful-energy scoring.',
+      tone: 'neutral',
+    }
+  }
+  return {
+    label: 'Unavailable',
+    detail: snapshot.detail || 'Power telemetry is unavailable on this machine or runtime path.',
+    tone: 'warn',
+  }
+}
+
+function formatPowerWatts(value?: number | null) {
+  if (value == null || Number.isNaN(value) || value <= 0) return '—'
+  return `${value.toFixed(value >= 10 ? 0 : 1)} W`
+}
+
+function formatEnergyWh(value?: number | null) {
+  if (value == null || Number.isNaN(value) || value <= 0) return '—'
+  if (value < 1) return `${value.toFixed(3)} Wh`
+  return `${value.toFixed(value >= 10 ? 1 : 2)} Wh`
+}
+
+function formatEnergyTier(value?: string | null) {
+  switch (value) {
+    case 'trusted_meter':
+      return 'Trusted meter'
+    case 'wall_meter':
+      return 'Wall meter'
+    case 'device_sensor':
+      return 'Device sensor'
+    case 'estimated_tdp':
+      return 'Estimated TDP'
+    default:
+      return '—'
+  }
+}
+
+function formatEnergySource(value?: string | null) {
+  switch (value) {
+    case 'heartbeat_power_watts':
+      return 'Heartbeat power'
+    default:
+      return value ? value.replace(/_/g, ' ') : '—'
   }
 }
 
